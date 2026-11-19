@@ -44,6 +44,10 @@ class TrainingConfig:
     save_path: Optional[str] = None
     max_corpus_tokens: int = 2_000_000
     seed: Optional[int] = 1234
+    #: Train on the prose in eddi/corpus_prose as well as the pack prose. That
+    #: corpus exists to make the language model fluent; it is off for the small
+    #: builds (tests, the capability suite) that only need facts.
+    use_prose_corpus: bool = True
 
 
 @dataclass
@@ -60,6 +64,9 @@ class TrainingReport:
     perplexity_after: Optional[float] = None
     perplexity_in_vocab: Optional[float] = None
     perplexity_bigram_baseline: Optional[float] = None
+    #: Share of prompted continuations that stay on the trained sentence. This
+    #: is the metric that tracks usable generation; perplexity does not.
+    completion_accuracy: Optional[float] = None
     coherence_after: Optional[float] = None
     fact_accuracy: Optional[float] = None
     reasoning_accuracy: Optional[float] = None
@@ -87,6 +94,11 @@ class TrainingReport:
             lines.append(f"  perplexity after  : {self.perplexity_after:.2f}  (lower is better)")
         if self.perplexity_in_vocab is not None:
             lines.append(f"  perplexity in-voc : {self.perplexity_in_vocab:.2f}  (known words only)")
+        if self.completion_accuracy is not None:
+            lines.append(
+                f"  completion        : {self.completion_accuracy * 100:.0f}%  "
+                "(prompted continuations that stay on the sentence - this is the one to watch)"
+            )
         if self.perplexity_bigram_baseline is not None and self.perplexity_after:
             gain = self.perplexity_bigram_baseline / self.perplexity_after
             if gain >= 1.0:
@@ -164,6 +176,13 @@ def train(
         for s, r, o in curriculum.pack_facts(pack):
             agent.teach(s, r, o)
         epoch_sentences.extend(curriculum.pack_prose(pack))
+    if cfg.use_prose_corpus:
+        from .corpus_prose import all_sentences
+
+        prose = all_sentences()
+        if prose:
+            epoch_sentences.extend(prose)
+            emit(f"· prose corpus: {len(prose)} sentences")
 
     # Read each corpus file once, then replay it every epoch (streaming, not stored twice).
     corpus_docs: List[str] = []
@@ -219,6 +238,7 @@ def train(
             epoch_sentences, corpus_docs
         )
         report.coherence_after = after["bigram_coherence"]
+        report.completion_accuracy = after.get("completion_accuracy")
         report.fact_accuracy = after["fact_accuracy"]
         report.reasoning_accuracy = after["reasoning_accuracy"]
         report.details = {

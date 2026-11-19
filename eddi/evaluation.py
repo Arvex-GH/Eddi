@@ -96,6 +96,52 @@ def evaluate_generation(agent) -> float:
     return good / len(GENERATION_PROMPTS)
 
 
+#: Prompt -> the sentence it opens, which the model saw during training. A
+#: continuation that reproduces the rest of that sentence has learned the
+#: sequence; one that emits a stray word has not.
+COMPLETION_PROBES: List[Tuple[str, str]] = [
+    ("the derivative of", "the derivative of x squared is two x"),
+    ("a catalyst", "a catalyst lowers activation energy and is not consumed"),
+    ("the cell is", "the cell is the basic unit of life"),
+    ("gravity is", "gravity is the weakest fundamental force"),
+    ("a machine is", "a machine is a device that transforms energy"),
+    ("water freezes", "water freezes at zero degrees Celsius"),
+    ("entropy grows", "entropy grows in any closed system"),
+    ("a network moves", "a network moves data between machines as small packets"),
+    ("the kernel is", "the kernel is the part of the operating system"),
+    ("an ecosystem is", "an ecosystem is a community of organisms plus the physical world"),
+]
+
+
+def evaluate_completion(agent) -> float:
+    """How often a greedy continuation keeps going and stays on the sentence.
+
+    Perplexity alone is a poor guide for this model: a shallow model that
+    always predicts "the" scores *better* on perplexity than a deeper one that
+    commits to a real continuation, because vagueness is never surprising. That
+    is why order 2 beat order 4 on held-out perplexity while answering "water
+    freezes" with a full stop.
+
+    Two things are required of a good continuation, and neither is rewarded by
+    perplexity: it must be long enough to say something, and it must agree with
+    the sentence the model was trained on. Length is capped at four content
+    words so a long ramble does not pass by accident.
+    """
+    if not agent.lm.trained_tokens:
+        return 0.0
+    good = 0
+    for prompt, expected in COMPLETION_PROBES:
+        text = agent.generate(prompt, max_tokens=12, temperature=0.0)
+        continuation = text[len(prompt):].strip()
+        if len(continuation.split()) < 3:
+            continue
+        wanted = [w for w in expected[len(prompt):].lower().split() if len(w) > 2][:4]
+        got = continuation.lower()
+        if wanted and sum(1 for w in wanted if w in got) >= max(2, len(wanted) // 2):
+            good += 1
+    return good / len(COMPLETION_PROBES)
+
+
 def bigram_baseline(sentences, extra_texts=()) -> float:
     """Held-out perplexity of a plain bigram chain trained on exactly the same text.
 
@@ -121,6 +167,7 @@ def run_benchmark(agent, include_reasoning: bool = True) -> Dict[str, float]:
         **language,
         "fact_accuracy": fact_accuracy,
         "generation_quality": evaluate_generation(agent),
+        "completion_accuracy": evaluate_completion(agent),
         "fact_total": float(len(FACT_PROBES)),
         "fact_misses": float(len(fact_misses)),
     }
