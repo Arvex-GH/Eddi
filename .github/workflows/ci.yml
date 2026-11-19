@@ -17,11 +17,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
+          # 3.12 is the fastest provisioning path on all three runners.
+          # The package still *supports* 3.9 (see the syntax gate below);
+          # setup-python 3.9 downloads have been flaky/unavailable.
           python-version: "3.12"
       - name: Install
         run: python -m pip install --upgrade pip && python -m pip install .
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      - name: Verify Python 3.9 syntax compatibility
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+          bad = []
+          for p in pathlib.Path("eddi").rglob("*.py"):
+              try:
+                  ast.parse(p.read_text(), feature_version=(3, 9))
+              except SyntaxError as e:
+                  bad.append(f"{p}:{e.lineno}: {e.msg}")
+          if bad:
+              sys.exit("Python 3.9 incompatible syntax:\n" + "\n".join(bad))
+          print("all modules parse as Python 3.9")
+          PY
+
       - name: Train + benchmark (quality gate)
         run: |
           python -m eddi.cli --train --epochs 2 --max-tokens 200000
