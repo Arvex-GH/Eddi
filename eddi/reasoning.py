@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import ast
 import datetime
+import math
 import operator
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+from .memory import identifiers_of, terms_of
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_+#']+")
 _MATH_CHARS_RE = re.compile(r"^[\d\s.\+\-\*/%^()×÷,]+$")
@@ -75,6 +78,32 @@ def _inverse_lookup(agent, subject: str, relation: Optional[str]) -> List[str]:
                 continue
             out.append(f"{src_subject} --{src_relation}--> {subject}")
     return out
+
+
+def _query_score_ceiling(memory, query: str) -> float:
+    """The strongest score this query could reach in this store.
+
+    Computed by scoring the query against a synthetic chunk containing every
+    query term - i.e. what a perfect match would look like. Normalising against
+    it makes the acceptance threshold portable across corpus sizes.
+    """
+    terms = terms_of(query)
+    idents = identifiers_of(query)
+    if not terms and not idents:
+        return 0.0
+    n_docs = max(1, len(memory))
+    total = 0.0
+    for term in terms:
+        df = len(memory._postings.get(term, []))
+        if not df:
+            continue
+        total += math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+    # The phrase boost is part of the score the searcher can award, so it has to
+    # be part of the ceiling too - otherwise a phrase hit scores above "perfect"
+    # and the ratio stops meaning anything.
+    if len(" ".join(query.lower().split())) > 8:
+        total += 3.0
+    return total + (6.0 * len(idents))
 
 
 def _keywords(text: str) -> List[str]:
@@ -169,7 +198,124 @@ class Reasoner:
             answer = handler(text)
             if answer is not None:
                 return answer
-        return self._handle_generate(text)
+        # Retrieval from memory is the last resort before free-form generation:
+        # structured knowledge wins, and stored text beats a model that will
+        # always say *something* whether or not it knows.
+        return self._handle_memory(text) or self._handle_generate(text)
+
+    # -------------------------------------------------------------- memory
+    # Retrieval over stored text. Deliberately placed *after* the structured
+    # handlers, which are exact, and *before* the language model, which will
+    # always produce something whether or not it knows.
+    _MIN_MEMORY_SCORE = 1.2
+
+    _QUESTION_MARKERS = re.compile(
+        r"\b(?:what|which|who|whom|whose|when|where|why|how|is|are|was|were|"
+        r"does|do|did|can|could|should|would|will)\b",
+        re.IGNORECASE,
+    )
+
+    #: "tell me about water" asks for something just as much as "what is water".
+    _REQUEST_MARKERS = re.compile(
+        r"^\s*(?:tell\s+me|explain|describe|show\s+me|give\s+me|list|"
+        r"what\s+do\s+you\s+know|do\s+you\s+know)\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_question(self, text: str) -> bool:
+        """Distinguish a question from a statement.
+
+        A leading greeting is peeled off first: "Hi! Tell me about water" is a
+        request, not a statement about oneself.
+        """
+        stripped = self._GREETING_OPENERS.sub("", text.strip()).strip(" ,.!")
+        if not stripped:
+            return False
+        if stripped.endswith("?"):
+            return True
+        if self._REQUEST_MARKERS.search(stripped):
+            return True
+        # The interrogative has to *open* the sentence. Matching it anywhere
+        # marks every declarative with a copula as a question: "the sky is blue"
+        # becomes a question, so it is filed as one and can never be recalled.
+        return bool(self._QUESTION_MARKERS.match(stripped))
+
+    def _handle_memory(self, text: str) -> Optional[Answer]:
+        """Answer from verbatim stored text when it matches well enough.
+
+        A retrieval hit is evidence, not proof: the score threshold is what
+        separates "this span is about the question" from "these two chunks share
+        the word 'the'". Below the threshold we return None and let the caller
+        fall through to an honest refusal.
+        """
+        memory = getattr(self.agent, "memory", None)
+        if memory is None or not len(memory):
+            return None
+        if not self._looks_like_question(text):
+            # A statement has just been stored by the caller; matching it against
+            # itself and returning it as an answer is a tautology, not an answer.
+            return Answer(
+                "Noted - I've stored that.",
+                kind="remembered",
+                confidence=1.0,
+                details=["written to verbatim memory"],
+            )
+        hits = memory.search(text, k=5)
+        if not hits:
+            return None
+
+        # A stored question is weak evidence: a previously asked question
+        # resembles the current one closely without containing any answer.
+        def _is_question(chunk) -> bool:
+            return chunk.source in ("question", "reply-question") or chunk.text.strip().endswith("?")
+
+        # Never fall back to question chunks: if the only things that resemble
+        # the query are earlier questions, memory has nothing to say and the
+        # honest answer is to decline.
+        pool = [h for h in hits if not _is_question(h.chunk)]
+        if not pool:
+            return None
+
+        # Acceptance is decided by *coverage*, not by raw score. BM25 magnitudes
+        # depend on corpus size, so any absolute threshold works on one store and
+        # fails on another; and a ratio against the best possible score lets a
+        # chunk through on a single common word. What actually distinguishes a
+        # real match is how much of the question the chunk accounts for.
+        q_terms = set(terms_of(text))
+        q_idents = set(identifiers_of(text))
+        wanted = max(1, len(q_terms))
+        best = None
+        best_cover = 0.0
+        for hit in pool:
+            matched = set(hit.matched_terms) & q_terms
+            coverage = len(matched) / wanted
+            if q_idents and hit.matched_identifiers:
+                coverage = 1.0  # an exact identifier is decisive on its own
+            # A single shared word is not a match. "hi" shares "hi" with
+            # "hi, what is python" and would answer it with a greeting.
+            if len(matched) < 2 and not (q_idents and hit.matched_identifiers):
+                continue
+            if coverage > best_cover:
+                best, best_cover = hit, coverage
+        if best is None or best_cover < 0.34:
+            return None
+        # A question that the fact base could answer is handled earlier; by the
+        # time we are here the knowledge base had nothing, so pass the span on.
+        quoted = best.text.strip()
+        if len(quoted) > 420:
+            quoted = quoted[:420].rsplit(" ", 1)[0] + "..."
+        source = f" (from {best.chunk.source})" if best.chunk.source else ""
+        return Answer(
+            quoted + source,
+            kind="memory",
+            confidence=min(1.0, best.score / 8.0),
+            details=[
+                f"memory chunk #{best.chunk.id}, score {best.score:.2f}",
+                "matched: " + ", ".join(
+                    (best.matched_identifiers + best.matched_terms)[:6]
+                ) if (best.matched_identifiers or best.matched_terms) else "phrase match",
+            ],
+        )
 
     # ------------------------------------------------------------- knowledge
     def _handle_webpage(self, text: str) -> Optional[Answer]:

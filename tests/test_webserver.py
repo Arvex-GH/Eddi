@@ -410,3 +410,68 @@ class TestCapabilitySuite(unittest.TestCase):
         self.assertEqual(
             failures, [], "\n".join(f"{r['question']} -> {r['answer'][:60]}" for r in failures)
         )
+
+class TestVerbatimMemory(unittest.TestCase):
+    """The store must answer from what the user said, and only that."""
+
+    def _agent(self):
+        import tempfile, os
+        from eddi.agent import EddiAgent
+
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "m.jsonl")
+        return EddiAgent(persist_context=False, memory_path=self.path)
+
+    def test_recalls_a_statement(self):
+        agent = self._agent()
+        agent.answer("the ISS orbits at about 400 kilometres altitude")
+        reply = agent.answer("how high does the ISS orbit?")
+        self.assertEqual(reply.kind, "memory")
+        self.assertIn("400", reply.text)
+        agent.close(save=False)
+
+    def test_unknown_is_still_unknown(self):
+        agent = self._agent()
+        agent.answer("the ISS orbits at about 400 kilometres altitude")
+        self.assertNotEqual(agent.answer("what is a quux").kind, "memory")
+        agent.close(save=False)
+
+    def test_survives_restart(self):
+        agent = self._agent()
+        agent.answer("the ISS orbits at about 400 kilometres altitude")
+        agent.close(save=False)
+        fresh = EddiAgent(persist_context=False, memory_path=self.path)
+        reply = fresh.answer("how high does the ISS orbit?")
+        self.assertEqual(reply.kind, "memory")
+        self.assertIn("400", reply.text)
+        fresh.close(save=False)
+
+    def test_a_question_never_answers_itself(self):
+        agent = self._agent()
+        agent.answer("what is a quux")
+        # Asked again, the stored copy of the question must not become the answer.
+        self.assertNotEqual(agent.answer("what is a quux").kind, "memory")
+        agent.close(save=False)
+
+    def test_echoes_and_chit_chat_are_not_stored(self):
+        agent = self._agent()
+        agent.answer("hi")
+        agent.answer("thanks")
+        sources = {c.source for c in agent.memory.chunks}
+        self.assertNotIn("turn", sources)
+        agent.close(save=False)
+
+    def test_store_does_not_grow_on_repeats(self):
+        agent = self._agent()
+        before = len(agent.memory)
+        agent.answer("the sky is blue")
+        agent.answer("the sky is blue")
+        self.assertEqual(len(agent.memory), before + 1)
+        agent.close(save=False)
+
+    def test_structured_knowledge_outranks_memory(self):
+        agent = self._agent()
+        agent.answer("Paris is the capital of France")
+        reply = agent.answer("where is Paris")
+        self.assertNotEqual(reply.kind, "memory")
+        agent.close(save=False)

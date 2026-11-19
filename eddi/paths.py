@@ -75,3 +75,15 @@ def find_core_binary(start: Path | None = None) -> Path | None:
         if c.is_file():
             return c
     return None
+
+
+def default_memory_path() -> str:
+    """Where verbatim memory lives: alongside the brain, not in the brain.
+
+    Memory is append-only, so it is its own file: a crash while writing a chunk
+    cannot corrupt the facts or the language model.
+    """
+    override = os.environ.get("EDDI_MEMORY")
+    if override:
+        return override
+    return os.path.join(user_data_dir(), "eddi_memory.jsonl")
