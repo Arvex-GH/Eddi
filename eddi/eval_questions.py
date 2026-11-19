@@ -195,6 +195,28 @@ SUITE: List[Case] = [
     Case("largest city", "what is the largest city of China", ("Shanghai",)),
     Case("physical geography", "what is the height meters of Everest", ("8849",)),
 
+    # -------------------------------------------------------------- computing
+    Case("computing: complexity", "what is the average lookup of hash table", ("O_of_1",)),
+    Case("computing: complexity", "what is the runtime of merge sort", ("n_log_n",)),
+    Case("computing: complexity", "what is the worst runtime of quick sort", ("n_squared",)),
+    Case("computing: structure", "what is the order of stack", ("last in first out",)),
+    Case("computing: structure", "what is the order of queue", ("first in first out",)),
+    Case("computing: networks", "what is the default port of HTTPS", ("443",)),
+    Case("computing: networks", "what is the layers of osi model", ("7",)),
+    Case("computing: networks", "what is the address bits of ipv6", ("128",)),
+    Case("computing: databases", "what is the properties of transaction", ("atomicity", "durability")),
+    Case("computing: status codes", "what is the meaning of http status 404", ("not found",)),
+
+    # --------------------------------------------------------------- language
+    Case("language: grammar", "what is the definition of pronoun", ("replacing a noun",)),
+    Case("language: grammar", "what is the definition of transitive verb", ("direct object",)),
+    Case("language: rhetoric", "what is the definition of metaphor", ("without like or as",)),
+    Case("language: rhetoric", "what is the appeal of pathos", ("emotion",)),
+    Case("language: families", "what is the family of French", ("romance",)),
+    Case("language: families", "what is the family of Mandarin", ("sino tibetan",)),
+    Case("language: literature", "what is the structure of sonnet", ("14",)),
+    Case("language: literature", "what is the structure of haiku", ("5 7 5",)),
+
     # ---------------------------------------------------------------- history
     Case("history: date", "what is the invented year of printing press", ("1440",)),
     Case("history: date", "what is the reached americas year of Columbus", ("1492",)),
