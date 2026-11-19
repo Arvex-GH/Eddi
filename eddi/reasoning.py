@@ -279,6 +279,18 @@ class Reasoner:
         if match:
             return self._answer_attribute(match.group(1), match.group(2))
 
+        # "what <relation> is <subject>" - the way people actually ask
+        # ("what colour is zorblax?"). The relation is whatever sits between
+        # 'what' and 'is', and it only routes when that word really is a
+        # written relation, so ordinary questions fall through untouched.
+        match = re.match(r"^what\s+(.+?)\s+(?:is|are|was)\s+(?:the\s+)?(.+?)[\?\.\!]*$",
+                         text, re.IGNORECASE)
+        if match:
+            relation = self.agent.resolve_relation(match.group(1))
+            subject = self.agent.resolve_entity(match.group(2))
+            if relation and subject and self.agent.kb.query(subject, relation):
+                return self._answer_relation(subject, relation, original=text)
+
         # "what does <subject> <verb>?"  /  "who does <subject> <verb>?"
         match = re.match(r"^(?:what|who)\s+(?:does|do|did)\s+(?:the\s+)?(.+?)\s+([\w \-]+?)[\?\.\!]*$",
                          text, re.IGNORECASE)
@@ -325,7 +337,7 @@ class Reasoner:
         relation = self.agent.resolve_relation(relation_text)
         if subject is None:
             return Answer(
-                f"I don't know '{subject_text}' yet. Try 'teach {subject_text} <relation> <value>'.",
+                f"I don't know '{subject_text}' yet. Teach me a fact about it and ask again.",
                 kind="unknown",
             )
         if relation and self.agent.kb.query(subject, relation):
@@ -368,7 +380,7 @@ class Reasoner:
         hits = self.agent.kb.query(resolved_subject, resolved_relation, top_k=3)
         if not hits:
             return Answer(
-                f"I don't know that yet. Try 'teach {resolved_subject} {resolved_relation} <value>'.",
+                f"I don't know that yet. Teach me a {resolved_relation} for {resolved_subject} and ask again.",
                 kind="unknown",
             )
         objects = ", ".join(obj for obj, _ in hits)
@@ -565,7 +577,88 @@ class Reasoner:
                 "or run `python -m eddi.cli --train` to build the built-in curriculum.",
                 kind="unknown",
             )
+        # An n-gram model will always continue *something*, so a fluent answer is
+        # not evidence of knowledge. If the question is about a word the model has
+        # never seen, the continuation cannot be about it - refusing is correct,
+        # and returning a confident-looking sentence would be a lie.
+        #
+        # Never refuse something the knowledge base can actually answer: facts
+        # written with `teach` are not in the language model's vocabulary, and a
+        # guard placed before this check would deny knowledge Eddi really has.
+        if self._kb_can_answer(text):
+            return self._answer_from_kb(text)
+        unknown = self._unknown_key_terms(text)
+        if unknown:
+            return Answer(
+                f"I don't know anything about '{unknown[0]}' yet.",
+                kind="unknown",
+                details=[f"not in vocabulary: {', '.join(unknown)}"],
+            )
         generated = self.agent.generate(text, max_tokens=28)
         if not generated:
             return Answer("I have nothing to build on yet.", kind="unknown")
-        return Answer(generated, kind="generate", confidence=0.5, details=["interpolated n-gram model"])
+        # An n-gram model primes on its own prompt, so the cheapest continuation
+        # is to repeat the question. That is not an answer, so strip it.
+        body = generated.strip()
+        prompt = text.strip()
+        if body.lower().startswith(prompt.lower()):
+            body = body[len(prompt):].lstrip(" .,:;-").strip()
+        if len(body.split()) < 3:
+            return Answer(
+                f"I don't have anything specific about '{text.strip()}' - "
+                "my language model has too little text to build a real answer.",
+                kind="unknown",
+            )
+        return Answer(
+            body,
+            kind="generate",
+            confidence=0.5,
+            details=["interpolated n-gram model"],
+        )
+
+    def _kb_can_answer(self, text: str) -> bool:
+        """Is there a written fact that plausibly answers this question?"""
+        subject = self.agent.resolve_entity(text)
+        if subject and self.agent.kb.facts_about(subject):
+            return True
+        for word in _WORD_RE.findall(text):
+            resolved = self.agent.resolve_entity(word)
+            if resolved and self.agent.kb.facts_about(resolved):
+                return True
+        return False
+
+    def _answer_from_kb(self, text: str) -> Answer:
+        """Answer from written facts after the phrase parsers declined."""
+        subject = self.agent.resolve_entity(text)
+        if subject and self.agent.kb.facts_about(subject):
+            return self._about(subject)
+        for word in _WORD_RE.findall(text):
+            resolved = self.agent.resolve_entity(word)
+            if resolved and self.agent.kb.facts_about(resolved):
+                return self._about(resolved)
+        return Answer(f"I don't know anything about '{text.strip()}' yet.", kind="unknown")
+
+    _STOP_TERMS = frozenset(
+        """
+        what is are was were the a an of for to in on at about tell me you your
+        i we they it this that these those do does did can could should would
+        please and or but how why when where which who whom whose with from by
+        know more please explain describe give show make made making get got
+        use used using need want like way thing things something anything
+        """.split()
+    )
+
+    def _unknown_key_terms(self, text: str) -> List[str]:
+        """Content words the language model has never seen, longest first."""
+        vocab = getattr(self.agent.lm, "vocab", None)
+        if not vocab:
+            return []
+        known = {str(w).lower() for w in vocab}
+        out: List[str] = []
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_'-]*", text):
+            word = raw.lower().strip("'-")
+            if len(word) < 3 or word in self._STOP_TERMS or word in known:
+                continue
+            out.append(raw)
+        out.sort(key=len, reverse=True)
+        return out

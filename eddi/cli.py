@@ -268,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--bench", action="store_true", help="run the held-out benchmark")
     mode.add_argument("--chat", action="store_true", help="interactive chat")
     mode.add_argument("--serve", action="store_true", help="serve a JSON HTTP API")
+    mode.add_argument("--ui", action="store_true", help="serve the browser chat UI")
     mode.add_argument("--ask", metavar="QUESTION", help="answer one question and exit")
     mode.add_argument(
         "--web",
@@ -314,6 +315,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_chat(args)
     if args.serve:
         return cmd_serve(args)
+    if args.ui:
+        from .webserver import main as ui_main
+
+        forwarded = ["--host", args.host, "--port", str(args.port)]
+        if args.brain:
+            forwarded += ["--brain", args.brain]
+        if args.no_save:
+            forwarded.append("--no-save")
+        return ui_main(forwarded)
     if args.web:
         return cmd_web(args)
     if args.ask:

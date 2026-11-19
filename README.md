@@ -265,12 +265,48 @@ eddi --train [--pack P]... [--corpus DIR]... [--epochs N] [--order N] [--prune N
 eddi --bench [--json]       held-out benchmark with miss explanations
 eddi --ask "..." [--explain] [--save]
 eddi --chat [--save-on-exit]
+eddi --ui [--host H] [--port 8000]      browser chat UI (talk to Eddi in a tab)
 eddi --serve [--host H] [--port 8765]   JSON API: GET /health /stats, POST /ask
 eddi-gui                    Tkinter desktop app (train, chat, ingest, save)
 ```
 
 `--brain PATH` points at a different brain file (default: `eddi_brain.pkl` in the OS temp dir;
 use `--brain ./eddi_brain.pkl` to keep it next to your project).
+
+### Browser UI
+
+```bash
+python -m eddi.cli --ui              # or: python -m eddi.webserver --port 8000
+```
+
+Opens a chat page on `http://localhost:8000` (bind `0.0.0.0` so a preview pane or
+another device can reach it). No build step, no framework, no CDN — one page
+served from `eddi/webserver.py`, styled with the same design tokens as the
+generated pages.
+
+What it does:
+
+| | |
+|---|---|
+| **Chat** | Type or click a suggestion; each answer is tagged with the capability that produced it (`about`, `math`, `ask`, `generate`) and its confidence. |
+| **Honest refusals** | If Eddi does not know something it says so and offers a form to teach it, instead of continuing the language model into a confident-sounding sentence. |
+| **Teach inline** | When Eddi says it does not know a subject, an inline form writes the fact — and it is saved to the brain immediately, so it survives a restart. |
+| **Live status** | Header shows fact count, trained tokens and liveness. |
+
+Endpoints (also usable on their own):
+
+```
+GET  /          the chat page
+GET  /health    {"status":"ok","version":...}
+GET  /stats     fact count, vocab, trained tokens
+POST /ask       {"text":"..."} -> {"text","kind","confidence"}
+POST /teach     {"subject","relation","object"}   writes one fact
+POST /ingest    {"text":"..."}                    learns from a paragraph
+```
+
+The server is stateless with respect to conversation: the transcript lives in the
+page, so two tabs cannot corrupt each other. Requests are serialised through a
+lock because the agent itself is not thread-safe.
 
 ### HTTP API
 
@@ -304,7 +340,7 @@ agent falls back to `mmap` automatically when it is absent.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 28 tests, cross-platform
+python -m unittest discover -s tests -v     # 70 tests, cross-platform
 ```
 
 The suite covers hypervector algebra (bind/unbind, bundles, permutation), fuzzy knowledge
