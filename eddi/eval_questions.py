@@ -174,12 +174,31 @@ SUITE: List[Case] = [
 
     # ---------------------------------------------------- more distinct angles
     Case("multi-fact aggregation", "tell me about Earth", ("planet", "gravity")),
-    Case("relation direction", "what is the gravity of Earth", ("9.81",)),
+    Case("relation direction", "what is the gravity of Earth", ("9 point 81",)),
     Case("nested phrase entity", "what is the speed of light", ("299792458",)),
     Case("spelled-out number", "what is 2 to the power of 10", ("1024",), kinds=("math",)),
     Case("query with article", "what is the shape of DNA", ("double helix",)),
     Case("abbreviation entity", "what is the port for HTTP", ("80",)),
     Case("hyphenated entity", "what is the default port for HTTPS", ("443",)),
+
+    # ---------------------------------------------------------- mathematics
+    Case("math: geometry", "what is the area formula of circle", ("pi", "radius squared")),
+    Case("math: geometry", "what is the circumference formula of circle", ("2", "radius")),
+    Case("math: geometry", "what is the angle sum of triangle", ("180",)),
+    Case("math: geometry", "what is the formula of pythagorean theorem", ("a squared",)),
+    Case("math: geometry", "what is the volume formula of cube", ("side",)),
+    Case("math: constants", "what is the approx value of pi", ("3 point 14159",)),
+    Case("math: constants", "what is the approx value of e", ("2 point 71828",)),
+    Case("math: calculus", "what is the derivative of sine", ("cosine",)),
+    Case("math: calculus", "what is the derivative of x squared", ("2x",)),
+    Case("math: calculus", "what is the meaning of derivative", ("rate of change",)),
+    Case("math: number theory", "what is the smallest of prime number", ("2",)),
+    Case("math: number theory", "what is the identity of gcd times lcm", ("product",)),
+    Case("math: algebra", "what is the formula of discriminant", ("b squared",)),
+    Case("math: algebra", "what is the base of natural logarithm", ("e",)),
+    Case("math: probability", "what is the shape of normal distribution", ("bell curve",)),
+    Case("math: probability", "what is the order matters of permutation", ("yes",)),
+    Case("math: probability", "what is the order matters of combination", ("no",)),
 ]
 
 
@@ -198,7 +217,7 @@ def build_agent() -> EddiAgent:
     agent = EddiAgent(persist_context=False, memory_path="", record_turns=False)
     # All five packs: the live brain is trained with geography too, and leaving
     # it out made every capital/continent question look like a failure.
-    for pack in ("core", "science", "computing", "reasoning", "geography"):
+    for pack in PACKS:
         for subject, relation, obj in PACKS[pack]["facts"]:
             agent.teach(subject, relation, obj)
         for sentence in PACKS[pack].get("prose", []):

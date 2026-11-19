@@ -65,7 +65,7 @@ SCIENCE_FACTS: List[Fact] = [
     ("Salt", "chemical_formula", "NaCl"),
     ("speed_of_light", "approx_value", "299792458_m_per_s"),
     ("gravity", "discovered_by", "Newton"),
-    ("Earth", "gravity", "9.81_m_per_s2"),
+    ("Earth", "gravity", "9_point_81_m_per_s2"),
     ("earthquake", "measured_by", "Richter_scale"),
     ("atom", "nucleus_contains", "protons_and_neutrons"),
     ("photosynthesis", "input", "light_water_and_CO2"),
@@ -259,8 +259,13 @@ GEOGRAPHY_PROSE: List[str] = [
     "A day has twenty four hours, and a minute has sixty seconds.",
 ]
 
+# The teaching curriculum lives in eddi/curriculum_packs/, one module per
+# subject, so this file stays a registry rather than growing without bound.
+from .curriculum_packs import mathematics as _mathematics
+
 PACKS: Dict[str, Dict[str, List]] = {
     "core": {"facts": CORE_FACTS, "prose": CORE_PROSE},
+    "mathematics": {"facts": _mathematics.FACTS, "prose": _mathematics.PROSE},
     "science": {"facts": SCIENCE_FACTS, "prose": SCIENCE_PROSE},
     "computing": {"facts": COMPUTING_FACTS, "prose": COMPUTING_PROSE},
     "reasoning": {"facts": REASONING_FACTS, "prose": REASONING_PROSE},
