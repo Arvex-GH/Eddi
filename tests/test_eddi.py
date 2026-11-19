@@ -687,3 +687,79 @@ class TestInterrogativeForm(unittest.TestCase):
             self.assertNotIn("384400", reply.text)
         finally:
             agent.close(save=False)
+
+class TestEngineeringLoop(unittest.TestCase):
+    """The loop must solve real bugs, judged by tests it never sees."""
+
+    def test_full_suite_resolves_every_task(self):
+        from eddi.swe.bench import run_suite
+        from eddi.swe.__main__ import _solver_factory
+
+        # Visible tests are hidden, so passing means the fix is behaviourally
+        # right rather than written to match an assertion the agent read.
+        outcomes = run_suite(_solver_factory(True), hide_visible_tests=True)
+        failed = [o.name for o in outcomes if not o.resolved]
+        self.assertEqual(failed, [], f"unresolved: {failed}")
+
+    def test_loop_alone_cannot_solve_them(self):
+        """The deterministic phases should get some of the way, not all of it.
+
+        This is the measurement behind the design claim: a large share of the
+        work is mechanical (localise, reproduce, verify), so a loop with no
+        proposer still makes progress. If this ever reaches 100%, the proposer
+        has stopped earning its place and the benchmark has become too easy.
+        """
+        from eddi.swe.bench import run_suite
+        from eddi.swe.__main__ import _solver_factory
+
+        outcomes = run_suite(_solver_factory(False), hide_visible_tests=True)
+        solved = sum(1 for o in outcomes if o.resolved)
+        self.assertLess(solved, len(outcomes))
+
+    def test_edit_refuses_an_ambiguous_snippet(self):
+        """An edit matching twice must fail loudly, not pick one silently."""
+        import tempfile
+        from eddi.swe.tools import Toolbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "m.py"
+            target.write_text("x = 1\nx = 1\n", encoding="utf-8")
+            tools = Toolbox(tmp)
+            result = tools.edit("m.py", "x = 1", "x = 2")
+            self.assertFalse(result.ok)
+            self.assertIn("2 times", result.text)
+            # and the file is untouched
+            self.assertEqual(target.read_text(encoding="utf-8"), "x = 1\nx = 1\n")
+
+    def test_tools_refuse_to_escape_the_repository(self):
+        import tempfile
+        from eddi.swe.tools import Toolbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = Toolbox(tmp)
+            with self.assertRaises(ValueError):
+                tools.read("../../etc/passwd")
+            escaped = tools.run("ls", cwd="..")
+            self.assertFalse(escaped.ok)
+
+    def test_traceback_frames_exclude_the_standard_library(self):
+        """Only frames inside the repo are worth reading."""
+        import tempfile
+        from eddi.swe.tools import Toolbox
+        from eddi.swe.loop import EngineeringLoop, parse_traceback
+
+        trace = (
+            'Traceback (most recent call last):\n'
+            '  File "/usr/lib/python3.11/unittest/loader.py", line 154, in load\n'
+            '    module = __import__(name)\n'
+            '  File "/repo/pkg/mod.py", line 7, in convert\n'
+            '    return x * self._cache["km"]\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "pkg").mkdir()
+            (Path(tmp) / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+            tools = Toolbox(tmp)
+            loop = EngineeringLoop(tools)
+            frames = parse_traceback(trace, root_prefix="/repo")
+            kept = loop._in_repo(frames)
+            self.assertEqual([f.path for f in kept], ["pkg/mod.py"])
