@@ -89,6 +89,9 @@ class NGramLanguageModel:
         # counts[n][(kind, ctx...)] = {next_id: count}; n == len(context)
         self.counts: List[Dict[Tuple, Dict[int, int]]] = [{} for _ in range(self.order + 1)]
         self.trained_tokens = 0
+        #: Sentences seen during training, kept so generation can be scored
+        #: against every sentence a prompt could legitimately continue.
+        self.trained_sentences: List[str] = []
         for special in (UNK, BOS, EOS, "<num>", "<punct>"):
             self._token_id(special)
 
@@ -142,9 +145,28 @@ class NGramLanguageModel:
                     dist[target] = dist.get(target, 0) + weight
         self.trained_tokens += len(ids) - 2
 
+    def sentences_starting_with(self, prefix: str) -> List[str]:
+        """Training sentences whose first words match ``prefix``.
+
+        Used to score generation without punishing a model for choosing a
+        different *correct* continuation: several sentences can begin with the
+        same few words.
+        """
+        wanted = [w.lower() for w in tokenize(prefix)]
+        out: List[str] = []
+        for sentence in self.trained_sentences:
+            words = [w.lower() for w in tokenize(sentence)]
+            if words[: len(wanted)] == wanted:
+                out.append(sentence)
+            if len(out) >= 6:
+                break
+        return out
+
     def train_sentences(self, sentences: Iterable[str], weight: int = 1) -> int:
         seen = 0
         for sentence in sentences:
+            if isinstance(sentence, str) and sentence.strip():
+                self.trained_sentences.append(sentence.strip())
             seen += self.train_text(sentence, weight=weight)
         return seen
 
@@ -335,7 +357,19 @@ class NGramLanguageModel:
             if weight_total <= 0:
                 break
             if temperature <= 0:  # greedy decoding is deterministic
-                chosen = ranked[0][0]
+                # A full stop that is merely the most common next token ends the
+                # answer and discards everything the model actually knows. It
+                # happens when one training sentence *ends* on this context
+                # ("... water freezes.") while another continues it ("Water
+                # freezes at zero degrees ..."). An unpunctuated continuation
+                # always says more, so prefer it unless nothing else exists.
+                stop = self.vocab.get(EOS, -1)
+                continuing = [
+                    (tid, weight)
+                    for tid, weight in ranked
+                    if tid not in (stop,) and self._id_to_token(tid) != "."
+                ]
+                chosen = (continuing or ranked)[0][0]
             else:
                 r = rng.random() * weight_total
                 chosen = ranked[-1][0]

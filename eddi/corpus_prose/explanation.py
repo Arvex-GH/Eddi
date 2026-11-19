@@ -127,7 +127,7 @@ SENTENCES: List[str] = [
     "A chemical reaction rearranges atoms without creating or destroying them.",
     "A reaction is balanced when the same number of each atom appears on both sides.",
     "Activation energy is the barrier a reaction must climb to proceed.",
-    "A catalyst lowers that barrier without being used up.",
+    "A catalyst provides a surface on which the reaction can take place.",
     "An exothermic reaction releases heat, and an endothermic reaction absorbs it.",
     "A solution is a solute dissolved in a solvent.",
     "Concentration measures how much solute is present per unit of solvent.",

@@ -131,15 +131,41 @@ def evaluate_completion(agent) -> float:
         return 0.0
     good = 0
     for prompt, expected in COMPLETION_PROBES:
-        text = agent.generate(prompt, max_tokens=12, temperature=0.0)
-        continuation = text[len(prompt):].strip()
-        if len(continuation.split()) < 3:
-            continue
-        wanted = [w for w in expected[len(prompt):].lower().split() if len(w) > 2][:4]
-        got = continuation.lower()
-        if wanted and sum(1 for w in wanted if w in got) >= max(2, len(wanted) // 2):
+        if _completion_ok(agent, prompt, expected):
             good += 1
     return good / len(COMPLETION_PROBES)
+
+
+def _content_words(text: str) -> set:
+    from .language import tokenize
+
+    return {w.lower().strip(".,!?;:") for w in tokenize(text) if len(w.strip(".,!?;:")) > 2}
+
+
+def _completion_ok(agent, prompt: str, expected: str) -> bool:
+    """True if greedy continuation of ``prompt`` follows ``expected``.
+
+    A prefix can legitimately begin more than one true sentence ("a catalyst
+    lowers ..." begins two), so the continuation is compared to *every* trained
+    sentence that starts with the prompt, not just one. Scoring against a
+    single reference punished the model for choosing a different true fact.
+    """
+    continuation = agent.generate(prompt, max_tokens=12, temperature=0.0)[len(prompt):].strip()
+    if len(continuation.split()) < 3:
+        return False
+
+    references = [expected] + agent.lm.sentences_starting_with(prompt)
+    got = _content_words(continuation)
+    if not got:
+        return False
+    for reference in references:
+        wanted = _content_words(reference[len(prompt):]) or _content_words(reference)
+        if not wanted:
+            continue
+        overlap = len(got & wanted) / len(wanted)
+        if overlap >= 0.4:
+            return True
+    return False
 
 
 def bigram_baseline(sentences, extra_texts=()) -> float:
