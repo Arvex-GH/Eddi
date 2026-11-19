@@ -26,20 +26,7 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Verify Python 3.9 syntax compatibility
-        run: |
-          python - <<'PY'
-          import ast, pathlib, sys
-          bad = []
-          for p in pathlib.Path("eddi").rglob("*.py"):
-              try:
-                  ast.parse(p.read_text(), feature_version=(3, 9))
-              except SyntaxError as e:
-                  bad.append(f"{p}:{e.lineno}: {e.msg}")
-          if bad:
-              sys.exit("Python 3.9 incompatible syntax:\n" + "\n".join(bad))
-          print("all modules parse as Python 3.9")
-          PY
-
+        run: python scripts/check_py39_syntax.py
       - name: Train + benchmark (quality gate)
         run: |
           python -m eddi.cli --train --epochs 2 --max-tokens 200000
