@@ -55,6 +55,12 @@ FACTS: List[Fact] = [
     ("sound_speed_in_air", "approx_value", "343_meters_per_second"),
     ("light_speed_in_vacuum", "value", "299792458_meters_per_second"),
     ("light_speed", "status", "universal_speed_limit"),
+    ("ice", "floats_on_water", "yes"),
+    ("ice", "cause_of_floating", "lower_density_than_liquid_water"),
+    ("Water", "maximum_density_celsius", "4"),
+    ("ice", "density_less_than_water", "yes"),
+    ("Water", "expands_when_freezing", "yes"),
+
     ("refraction", "cause", "change_of_speed_between_media"),
     ("reflection", "law", "angle_of_incidence_equals_angle_of_reflection"),
     ("prism", "effect", "splits_white_light_into_colours"),

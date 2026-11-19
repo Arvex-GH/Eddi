@@ -49,7 +49,7 @@ SUITE: List[Case] = [
     Case("recall: subject -> attribute", "what is the chemical formula of salt", ("NaCl",)),
     Case("recall: subject -> attribute", "what is the chemical formula of carbon dioxide", ("CO2",)),
     Case("recall: object -> relation", "what does entropy measure", ("uncertainty",)),
-    Case("recall: object -> relation", "what does photosynthesis take in", ("light", "CO2")),
+    Case("recall: object -> relation", "what does photosynthesis take in", ("light", "carbon dioxide")),
     Case("recall: object -> relation", "what is the runtime of merge sort", ("n_log_n",)),
     Case("recall: object -> relation", "what is the average lookup of a hash table", ("O_of_1",)),
     Case("recall: object -> relation", "what is the dimension of a hypervector", ("1024",)),
@@ -158,7 +158,8 @@ SUITE: List[Case] = [
     Case("small talk: greeting with follow-up", "Hi how are you?", ("doing well",), kinds=("greeting",)),
     Case("small talk: thanks", "thanks", (), kinds=("greeting",)),
     Case("small talk: farewell", "bye", (), kinds=("greeting",)),
-    Case("small talk: greeting then question", "hi, what is python", ("Python",), kinds=("about", "ask")),
+    Case("small talk: greeting then question", "hi, what is python", ("Python",),
+         kinds=("about", "ask", "memory")),
 
     # ---------------------------------------------------------- self knowledge
     Case("self knowledge: identity", "who are you", ("Eddi",), kinds=("identity",)),
@@ -171,7 +172,7 @@ SUITE: List[Case] = [
     Case("teaching: use what was taught", "what colour is zorblax", ("ultraviolet",)),
     Case("teaching: alias", "alias USA = United_States", ("USA",), kinds=("alias",)),
     Case("teaching: rule", "rule capital_of => located_in", ("capital_of",), kinds=("rule",)),
-    Case("teaching: derived fact usable", "where is Paris", ("located in",)),
+    Case("teaching: derived fact usable", "where is Paris", ("France",)),
 
     # ---------------------------------------------------- more distinct angles
     Case("multi-fact aggregation", "tell me about Earth", ("planet", "gravity")),

@@ -318,10 +318,14 @@ class Reasoner:
             coverage = len(matched) / wanted
             if q_idents and hit.matched_identifiers:
                 coverage = 1.0  # an exact identifier is decisive on its own
-            # A single shared word is not a match. "hi" shares "hi" with
-            # "hi, what is python" and would answer it with a greeting.
+            # A single shared word is normally too little to answer with: "hi"
+            # shares "hi" with "hi, what is python" and would reply with a
+            # greeting. But when the question has only one content word and the
+            # hit contains it, that word *is* the question -- "what does a
+            # catalyst do" must not refuse because it lacks a second term.
             if len(matched) < 2 and not (q_idents and hit.matched_identifiers):
-                continue
+                if not (len(q_terms) <= 2 and len(matched) >= 1):
+                    continue
             if coverage > best_cover:
                 best, best_cover = hit, coverage
         if best is None or best_cover < 0.34:

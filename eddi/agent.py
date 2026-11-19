@@ -150,6 +150,18 @@ class EddiAgent:
         return ingest_file(self, path)
 
     def train_corpus(self, sentences: Iterable[str], weight: int = 1) -> int:
+        """Train the language model on sentences, and keep them as text.
+
+        Prose used to reach only the n-gram model, so it influenced the next
+        token and nothing else: the sentence itself could never be quoted. Text
+        is now also written to verbatim memory, which lets a question be
+        answered with the sentence that states the answer rather than with a
+        plausible-sounding continuation.
+        """
+        sentences = list(sentences)
+        for sentence in sentences:
+            if isinstance(sentence, str) and sentence.strip():
+                self.memory.add(sentence, source="prose")
         return self.lm.train_sentences(sentences, weight=weight)
 
     # --------------------------------------------------------------- thinking
