@@ -1,0 +1,43 @@
+name: Build and Release Eddi
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build C++20 Core (Linux)
+        run: |
+          mkdir -p dist
+          g++ -O3 -std=c++20 -march=x86-64 src/eddi_core.cpp -o dist/eddi_core-linux-x86_64
+          tar -czf dist/eddi-linux-x86_64.tar.gz -C dist eddi_core-linux-x86_64
+      - name: Run Tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Publish Linux Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/eddi-linux-x86_64.tar.gz
+
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build C++20 Core (Windows)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          g++ -O3 -std=c++20 src/eddi_core.cpp -o dist/eddi_core-windows-x86_64.exe
+          Compress-Archive -Path dist/eddi_core-windows-x86_64.exe -DestinationPath dist/eddi-windows-x86_64.zip
+      - name: Run Tests
+        run: python -m unittest discover -s tests -v
+      - name: Publish Windows Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/eddi-windows-x86_64.zip
