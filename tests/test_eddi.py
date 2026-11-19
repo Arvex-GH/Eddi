@@ -763,3 +763,87 @@ class TestEngineeringLoop(unittest.TestCase):
             frames = parse_traceback(trace, root_prefix="/repo")
             kept = loop._in_repo(frames)
             self.assertEqual([f.path for f in kept], ["pkg/mod.py"])
+
+class TestVectorSymbolicMemory(unittest.TestCase):
+    """A hypervector memory stores associations exactly and composes them."""
+
+    def test_binding_is_self_inverse(self):
+        from eddi.swe.vsa import SymbolMemory
+
+        mem = SymbolMemory(dim=1024)
+        a, b = mem.vector("alpha"), mem.vector("beta")
+        bound = mem.bind(a, b)
+        self.assertEqual(mem.bind(bound, b), a)
+
+    def test_relations_round_trip(self):
+        from eddi.swe.vsa import SymbolMemory
+
+        mem = SymbolMemory(dim=1024)
+        mem.add("paris", "capital_of", "france")
+        mem.add("paris", "currency", "euro")
+        self.assertEqual(mem.lookup("paris", "capital_of"), ["france"])
+        self.assertIn(("currency", "euro"), mem.relations_of("paris"))
+
+    def test_chains_return_a_proof(self):
+        from eddi.swe.vsa import SymbolMemory
+
+        mem = SymbolMemory(dim=1024)
+        mem.add("france", "capital", "paris")
+        mem.add("paris", "capital_of", "france")
+        trail = mem.chain("france", ["capital", "capital_of"])
+        self.assertEqual([step.target for step in trail], ["paris", "france"])
+        self.assertEqual(str(trail[0]), "france --capital--> paris")
+
+    def test_reach_is_cycle_safe(self):
+        from eddi.swe.vsa import SymbolMemory
+
+        mem = SymbolMemory(dim=1024)
+        mem.add("a", "next", "b")
+        mem.add("b", "next", "a")
+        paths = mem.reach("a", "next", max_depth=6)
+        self.assertTrue(paths)
+        for path in paths:
+            targets = [s.target for s in path]
+            self.assertEqual(len(targets), len(set(targets)))
+
+    def test_bundle_capacity_matches_the_prediction(self):
+        """Recall degrades when items per bundle approaches D/pi.
+
+        This is the measured law, not a guess: at D/(pi*k) near 10 recall is
+        perfect, at 5 it is unreliable, at 2.5 it is gone. The test asserts the
+        safe side only, so it cannot become flaky as the implementation changes.
+        """
+        import math
+        from eddi.swe.vsa import SymbolMemory
+
+        dim, k = 2048, 64          # D/(pi*k) = 10.2, the safe side
+        mem = SymbolMemory(dim=dim)
+        for i in range(k):
+            mem.add("hub", f"r{i}", f"o{i}")
+        bundle = mem._bundle_for("hub")
+        for i in range(0, k, 8):
+            probe = mem.bind(mem.vector("hub"), mem.vector(f"r{i}"))
+            recovered = mem.bind(bundle, probe)
+            best, best_score = None, -9.0
+            for j in range(k):
+                score = mem.similarity(recovered, mem.vector(f"o{j}"), dim)
+                if score > best_score:
+                    best, best_score = j, score
+            self.assertEqual(best, i, f"lost item {i} at D/(pi*k)={dim/(math.pi*k):.1f}")
+
+    def test_repository_projection_records_structure(self):
+        import tempfile
+        from eddi.swe.tools import Toolbox
+        from eddi.swe.vsa import project_repository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "mod.py").write_text(
+                "def convert(value):\n    return value\n", encoding="utf-8")
+            (root / "test_mod.py").write_text(
+                "from pkg.mod import convert\n\ndef test_it():\n    pass\n",
+                encoding="utf-8")
+            mem = project_repository(Toolbox(tmp))
+            self.assertEqual(mem.lookup("convert", "defined_in"), ["pkg/mod.py"])
+            self.assertIn("pkg.mod", [t for _, t in mem.relations_of("test_mod")])

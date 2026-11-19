@@ -106,11 +106,23 @@ class Toolbox:
 
     # --------------------------------------------------------------- reading
     def ls(self, pattern: str = "*", limit: int = 200) -> ToolResult:
-        """List files whose path matches a glob. `**/x` matches at any depth."""
+        """List files whose path matches a glob. `**/x` matches at any depth.
+
+        `fnmatch` treats `**/` as requiring at least one separator, so a plain
+        `fnmatch('test_mod.py', '**/*.py')` is False and every module at the
+        repository root is silently invisible. A leading `**/` is therefore
+        tried both with and without a directory component.
+        """
+        alternatives = [pattern]
+        if pattern.startswith("**/"):
+            alternatives.append(pattern[3:])
         matches: List[str] = []
         for path in self._walk():
             rel = self._relative(path)
-            if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
+            if any(
+                fnmatch.fnmatch(rel, alt) or fnmatch.fnmatch(path.name, alt)
+                for alt in alternatives
+            ):
                 matches.append(rel)
         matches.sort()
         if not matches:
