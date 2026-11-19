@@ -28,6 +28,8 @@ from . import curriculum, evaluation
 from .agent import EddiAgent
 from .paths import default_brain_path, default_memory_path
 
+from .language import tokenize
+
 BRAIN_FORMAT = "eddi-brain-v2"
 
 
@@ -199,7 +201,11 @@ def train(
         emit(f"· epoch {epoch + 1}/{cfg.epochs}: {len(epoch_sentences)} curriculum sentences, "
              f"{documents} corpus documents")
         for sentence in epoch_sentences:
-            tokens += agent.ingest_text(sentence)
+            # ingest_text trains the language model and stores the text, but it
+            # does not record the sentence for generation scoring; train_corpus
+            # does both, so use it and count the tokens separately.
+            agent.train_corpus([sentence])
+            tokens += len(tokenize(sentence))
         for text in corpus_docs:
             if tokens >= cfg.max_corpus_tokens:
                 budget_hit = True

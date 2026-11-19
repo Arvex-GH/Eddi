@@ -458,6 +458,10 @@ class NGramLanguageModel:
                 for table in self.counts
             ],
             "trained_tokens": self.trained_tokens,
+            # The sentences the model learned from. Without them a loaded brain
+            # cannot quote its own training text, and the generation metric has
+            # nothing to score a continuation against.
+            "trained_sentences": list(self.trained_sentences),
         }
 
     @classmethod
@@ -476,6 +480,7 @@ class NGramLanguageModel:
             for key, dist in table:
                 model.counts[n][tuple(key)] = {int(t): int(c) for t, c in dist}
         model.trained_tokens = payload.get("trained_tokens", 0)
+        model.trained_sentences = list(payload.get("trained_sentences", []))
         for special in (UNK, BOS, EOS, "<num>", "<punct>"):
             model._token_id(special)
         return model

@@ -550,3 +550,32 @@ class TestLanguageModelOrder(unittest.TestCase):
         self.assertEqual(suggest_order(2_500), 4)
         self.assertEqual(suggest_order(25_000), 5)
         self.assertEqual(suggest_order(250_000), 6)
+
+class TestBrainCarriesCorpus(unittest.TestCase):
+    """A saved brain must keep the text it learned from."""
+
+    def test_trained_sentences_survive_a_save_and_load(self):
+        import tempfile
+        from eddi.training import load_brain, save_brain
+        from eddi.curriculum import PACKS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = os.path.join(tmp, "b.pkl")
+            agent = EddiAgent(lm_order=3, persist_context=False,
+                              memory_path=os.path.join(tmp, "m.jsonl"))
+            for sentence in PACKS["science"]["prose"]:
+                agent.train_corpus([sentence])
+            save_brain(agent, brain)
+            agent.close(save=False)
+
+            loaded = load_brain(brain)
+            try:
+                # Without this, a loaded agent cannot quote its training text and
+                # the generation metric has nothing to score against, which is
+                # how completion silently fell to 80% while the in-memory agent
+                # scored 90%.
+                self.assertEqual(
+                    len(loaded.lm.trained_sentences), len(PACKS["science"]["prose"])
+                )
+            finally:
+                loaded.close(save=False)
