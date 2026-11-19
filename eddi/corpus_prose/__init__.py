@@ -31,6 +31,7 @@ from typing import Dict, List
 from . import everyday
 from . import explanation
 from . import history_stories
+from . import language_writing
 from . import nature
 from . import people_ideas
 from . import science_explained
@@ -42,6 +43,7 @@ MODULES: Dict[str, List[str]] = {
     "history_stories": history_stories.SENTENCES,
     "people_ideas": people_ideas.SENTENCES,
     "everyday": everyday.SENTENCES,
+    "language_writing": language_writing.SENTENCES,
 }
 
 

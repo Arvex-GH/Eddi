@@ -41,6 +41,28 @@ _VERB_HINTS = frozenset(
 _VERB_SUFFIXES = ("s", "es", "ed", "ing", "ies", "ied")
 
 
+#: Base-form verbs that commonly open an imperative sentence ("Write for a
+#: reader...", "Prefer the active voice..."). Imperatives are good prose, and a
+#: checker that rejects them punishes exactly the clear writing the corpus is
+#: trying to teach.
+_IMPERATIVE_OPENERS = frozenset(
+    """write read take make keep put prefer use avoid cut define say show
+    distinguish separate quantify label state announce steel concede hedge
+    say cut vary edit choose consider compare check test measure count
+    describe explain give find follow start stop think imagine remember
+    treat ask answer look listen speak tell try build learn practice repeat
+    divide join remove add change move set leave bring begin""".split()
+)
+
+
+def _looks_imperative(words: List[str]) -> bool:
+    """True if the line opens with a base-form verb, as a command does."""
+    if not words:
+        return False
+    first = words[0].strip(".,!?;:\"'()").lower()
+    return first in _IMPERATIVE_OPENERS
+
+
 def _looks_verbal(word: str) -> bool:
     """True if a word is plausibly a verb form.
 
@@ -80,7 +102,7 @@ def check_sentences(sentences: Sequence[str], name: str = "corpus") -> List[str]
         if not text.endswith((".", "?", "!")):
             problems.append(f"{name}[{index}]: does not end a sentence: {text[:40]!r}")
         words = text.split()
-        if len(words) < MIN_WORDS:
+        if len(words) < MIN_WORDS and not _looks_imperative(words):
             problems.append(f"{name}[{index}]: only {len(words)} words: {text!r}")
         if len(words) > MAX_WORDS:
             problems.append(f"{name}[{index}]: {len(words)} words, too long: {text[:40]!r}")
@@ -91,7 +113,7 @@ def check_sentences(sentences: Sequence[str], name: str = "corpus") -> List[str]
             )
         else:
             seen[lowered] = index
-        if not any(_looks_verbal(word) for word in words):
+        if not any(_looks_verbal(word) for word in words) and not _looks_imperative(words):
             problems.append(f"{name}[{index}]: no verb, reads like a fragment: {text[:50]!r}")
 
     return problems
