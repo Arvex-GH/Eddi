@@ -4,40 +4,144 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-jobs:
-  release-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build C++20 Core (Linux)
-        run: |
-          mkdir -p dist
-          g++ -O3 -std=c++20 -march=x86-64 src/eddi_core.cpp -o dist/eddi_core-linux-x86_64
-          tar -czf dist/eddi-linux-x86_64.tar.gz -C dist eddi_core-linux-x86_64
-      - name: Run Tests
-        run: python3 -m unittest discover -s tests -v
-      - name: Publish Linux Release Asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/eddi-linux-x86_64.tar.gz
+env:
+  PYTHONIOENCODING: utf-8
 
-  release-windows:
-    runs-on: windows-latest
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.12"]  # 3.9 provisioning via setup-python is unreliable
     steps:
       - uses: actions/checkout@v4
-      - name: Build C++20 Core (Windows)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test the CLI (train, bench, ask)
+        run: |
+          python -m eddi.cli --train --epochs 2 --max-tokens 200000
+          python -m eddi.cli --bench
+          python -m eddi.cli --ask "what is the moon of earth" --explain
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-x86_64
+            binary: eddi_core-linux-x86_64
+            archive: eddi-linux-x86_64.tar.gz
+            pack: tar
+          - os: windows-latest
+            asset: windows-x86_64
+            binary: eddi_core-windows-x86_64.exe
+            archive: eddi-windows-x86_64.zip
+            pack: zip
+          - os: macos-latest
+            asset: macos-x86_64
+            binary: eddi_core-macos-x86_64
+            archive: eddi-macos-x86_64.tar.gz
+            pack: tar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ---------------------------------------------------------------- core
+      - name: Build C++20 core (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist build
+          g++ -O3 -std=c++20 -Wall -Wextra src/eddi_core.cpp -o "dist/${{ matrix.binary }}"
+          "dist/${{ matrix.binary }}" bench 200000
+      - name: Build C++20 core (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          g++ -O3 -std=c++20 src/eddi_core.cpp -o dist/eddi_core-windows-x86_64.exe
-          Compress-Archive -Path dist/eddi_core-windows-x86_64.exe -DestinationPath dist/eddi-windows-x86_64.zip
-      - name: Run Tests
-        run: python -m unittest discover -s tests -v
-      - name: Publish Windows Release Asset
+          g++ -O3 -std=c++20 -Wall -Wextra src/eddi_core.cpp -o "dist/${{ matrix.binary }}"
+          if ($LASTEXITCODE -ne 0) { throw "g++ failed with exit code $LASTEXITCODE" }
+          & ".\dist\${{ matrix.binary }}" bench 200000
+          if ($LASTEXITCODE -ne 0) { throw "eddi_core bench failed with exit code $LASTEXITCODE" }
+
+      # ------------------------------------------------------------ packaging
+      - name: Assemble standalone release
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="eddi-standalone-${{ matrix.asset }}"
+          mkdir -p "dist/$NAME"
+          cp "dist/${{ matrix.binary }}" "dist/$NAME/"
+          cp -r eddi README.md LICENSE pyproject.toml "dist/$NAME/"
+          find "dist/$NAME" -name '__pycache__' -type d -prune -exec rm -rf {} +
+          printf '%s\n' \
+            "Eddi standalone (${{ matrix.asset }})" \
+            "" \
+            "1. python -m eddi.cli --train      # train the built-in curriculum" \
+            "2. python -m eddi.cli --bench      # held-out benchmark" \
+            "3. python -m eddi.cli --chat       # talk to Eddi" \
+            "4. python -m eddi.cli --serve      # JSON API on http://127.0.0.1:8765" \
+            "The C++ core in this folder is optional; Python falls back automatically." \
+            > "dist/$NAME/README-STANDALONE.txt"
+
+      - name: Package binaries (tar.gz)
+        if: matrix.pack == 'tar'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "dist/${{ matrix.archive }}" -C dist "${{ matrix.binary }}" "eddi-standalone-${{ matrix.asset }}"
+      - name: Package binaries (zip)
+        if: matrix.pack == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/${{ matrix.binary }}", "dist/eddi-standalone-${{ matrix.asset }}" -DestinationPath "dist/${{ matrix.archive }}"
+
+      - name: Publish release assets ${{ matrix.asset }}
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/eddi-windows-x86_64.zip
+          files: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.binary }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  python-packages:
+    name: Python package artifacts
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish Python packages
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

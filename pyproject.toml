@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eddi-agent"
+version = "0.2.0"
+description = "Writable hyperdimensional memory + trained language model + 1M-token disk-backed context, on consumer hardware."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Arvex" }]
+keywords = ["hyperdimensional-computing", "hdc", "language-model", "agent", "memory-mapped"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.scripts]
+eddi = "eddi.cli:main"
+
+[project.gui-scripts]
+eddi-gui = "eddi.desktop:main"
+
+[project.urls]
+Homepage = "https://github.com/Arvex-GH/Eddi"
+
+[tool.setuptools]
+packages = ["eddi"]
