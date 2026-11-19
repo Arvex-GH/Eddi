@@ -33,6 +33,7 @@ from . import explanation
 from . import history_stories
 from . import language_writing
 from . import mind_and_society
+from . import technology
 from . import nature
 from . import people_ideas
 from . import science_explained
@@ -46,6 +47,7 @@ MODULES: Dict[str, List[str]] = {
     "everyday": everyday.SENTENCES,
     "language_writing": language_writing.SENTENCES,
     "mind_and_society": mind_and_society.SENTENCES,
+    "technology": technology.SENTENCES,
 }
 
 
