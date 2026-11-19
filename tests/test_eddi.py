@@ -507,3 +507,46 @@ class TestCrossPlatform(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestLanguageModelOrder(unittest.TestCase):
+    """Deeper context is not cosmetic: a shallow model splices false facts."""
+
+    @staticmethod
+    def _agent(order: int):
+        from eddi.curriculum import PACKS
+        import tempfile
+
+        agent = EddiAgent(
+            lm_order=order,
+            persist_context=False,
+            memory_path=os.path.join(tempfile.mkdtemp(), "m.jsonl"),
+            record_turns=False,
+        )
+        for pack in PACKS.values():
+            for sentence in pack.get("prose", []):
+                agent.train_corpus([sentence])
+        return agent
+
+    def test_order_four_does_not_splice_a_false_boiling_point(self):
+        # With order 3 the model produced "water boils at one hundred eighty
+        # degrees" by joining the water sentence to the triangle sentence. The
+        # number is wrong, which is worse than saying nothing.
+        agent = self._agent(order=4)
+        text = agent.generate("water freezes", max_tokens=16, temperature=0.0)
+        self.assertIn("one hundred degrees", text)
+        self.assertNotIn("eighty", text)
+        agent.close(save=False)
+
+    def test_order_four_completes_a_catalyst_sentence(self):
+        agent = self._agent(order=4)
+        text = agent.generate("a catalyst", max_tokens=16, temperature=0.0)
+        self.assertNotIn("largest city", text)
+        agent.close(save=False)
+
+    def test_suggest_order_scales_with_corpus(self):
+        from eddi.training import suggest_order
+
+        self.assertEqual(suggest_order(500), 3)
+        self.assertEqual(suggest_order(2_500), 4)
+        self.assertEqual(suggest_order(25_000), 5)
+        self.assertEqual(suggest_order(250_000), 6)

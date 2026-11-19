@@ -108,6 +108,28 @@ class TrainingReport:
         return "\n".join(lines)
 
 
+def suggest_order(corpus_tokens: int) -> int:
+    """Pick an n-gram order that the corpus can actually support.
+
+    A deeper model is strictly better *when there is enough text to fill it*:
+    with a 4.8k-token curriculum, order 3 blended sentences together and
+    answered "water boils at one hundred eighty degrees" by splicing a
+    geometry sentence onto a chemistry one, while order 5 reproduced both
+    correctly. But a deep order on a tiny corpus only adds contexts that are
+    seen once, so the thresholds below rise with the order.
+
+    These numbers are a floor, not a target: the README's advice to raise the
+    order on large corpora still applies.
+    """
+    if corpus_tokens >= 200_000:
+        return 6
+    if corpus_tokens >= 20_000:
+        return 5
+    if corpus_tokens >= 2_000:
+        return 4
+    return 3
+
+
 def _seed_untrained(agent: EddiAgent) -> None:
     """Give the 'before' evaluation a fair baseline: the facts but no language."""
     for pack in curriculum.ALL_PACKS:
