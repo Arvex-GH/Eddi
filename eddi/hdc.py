@@ -174,6 +174,13 @@ class WritableKnowledgeBase:
         if name in self.symbols:
             return name
         key = normalise_symbol(name)
+        # normalise_symbol drops a leading article, which is right for "the
+        # speed of light" but wrong for a title that begins with one: "the
+        # Elements" became "elements" and lost the book to a geometry symbol.
+        # Try the article-preserving form as well.
+        article_key = re.sub(r"\s+", "_", re.sub(r"[^\w\s]+", " ", name.strip()).strip().lower())
+        if article_key != key and article_key in self._alias:
+            return self._alias[article_key]
         if key in self.user_aliases:
             return self.user_aliases[key]
         if name.strip().lower() in self.user_aliases:
@@ -183,6 +190,15 @@ class WritableKnowledgeBase:
         lowered = {s.lower(): s for s in self.symbols}
         if key in lowered:
             return lowered[key]
+        # An exact symbol wins over a fuzzy neighbour. Fuzzy matching ran first
+        # until now, and "elements" is 0.93 similar to "element", so a question
+        # about Euclid's book resolved to a geometry concept and the fact
+        # (Euclid, wrote, the_Elements) became unreachable.
+        if key.strip("_") in lowered:
+            return lowered[key.strip("_")]
+        for symbol in self.symbols:
+            if symbol.replace("_", " ").lower() == key.replace("_", " ").lower():
+                return symbol
         if not self.symbols:
             return None
         match = difflib.get_close_matches(key, list(self._alias), n=1, cutoff=0.82)

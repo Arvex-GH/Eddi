@@ -159,6 +159,12 @@ def _format_number(value: float) -> str:
     return f"{value:.6g}"
 
 
+#: Objects that assert a property holds. A relation question may only be
+#: answered from these, because any other object is a *value* ("Berlin"), not
+#: a verdict, and "what is the capital of France" is not that kind of question.
+_AFFIRMATIVE = frozenset({"yes", "true", "1"})
+
+
 class Reasoner:
     """Routes a message to the right capability and composes the answer."""
 
@@ -186,6 +192,9 @@ class Reasoner:
             self._handle_analogy,
             self._handle_relations,
             self._handle_false_premise,
+            self._handle_who_verb,
+            self._handle_when,
+            self._handle_relation_question,
             self._handle_phrase_lookup,
             self._handle_types_of,
             self._handle_compare,
@@ -239,6 +248,24 @@ class Reasoner:
         # marks every declarative with a copula as a question: "the sky is blue"
         # becomes a question, so it is filed as one and can never be recalled.
         return bool(self._QUESTION_MARKERS.match(stripped))
+
+    #: Symbols that are notation, not words. Replacing their underscores with
+    #: spaces turns a correct answer into noise ("O of n log n"), so they pass
+    #: through untouched.
+    _NOTATION = frozenset({"O_of_1", "O_of_log_n", "O_of_n", "O_of_n_log_n", "O_of_n_squared"})
+
+    @classmethod
+    def _render(cls, value: str) -> str:
+        """Storage-safe text shown to a human.
+
+        Facts are written with underscores so a value survives tokenisation as a
+        single symbol ("19.3_g_per_cm3", "no_gpu"). Those underscores are an
+        encoding detail and must not reach the answer: the user asked for a
+        density, not for a symbol name.
+        """
+        if value in cls._NOTATION:
+            return value
+        return value.replace("_", " ")
 
     def _handle_memory(self, text: str) -> Optional[Answer]:
         """Answer from verbatim stored text when it matches well enough.
@@ -755,9 +782,9 @@ class Reasoner:
         facts = self.agent.kb.facts_about(subject)
         if not facts:
             return Answer(f"I don't know anything about '{subject}' yet.", kind="unknown")
-        lines = [f"{subject}:"]
+        lines = [f"{self._render(subject)}:"]
         for relation, obj, _conf in facts[:12]:
-            lines.append(f"  {relation}: {obj}")
+            lines.append(f"  {self._render(relation)}: {self._render(obj)}")
         return Answer("\n".join(lines), kind="about", confidence=1.0)
 
     def _handle_about(self, text: str) -> Optional[Answer]:
@@ -776,6 +803,167 @@ class Reasoner:
             return Answer(f"I don't know anything about '{match.group(1)}' yet.", kind="unknown")
         return self._about(subject)
 
+    #: "who invented the printing press" -> the fact is (printing_press,
+    #: invented_by, Gutenberg). The verb reverses subject and object, so these
+    #: need their own path; no subject-first handler can reach them.
+    _WHO_VERB_Q = re.compile(
+        # "the" is part of the captured name, not noise to discard: "the
+        # Elements" is a book title and stripping the article turned it into
+        # the bare symbol "element". resolve_entity copes with a stray article.
+        r"^who\s+(invented|discovered|wrote|composed|painted|founded|created|"
+        r"built|designed|developed|proposed|led|ruled)\s+(.+?)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    #: English past tense to the relation a fact would be stored under. The
+    #: curriculum writes "invented_by", "discovered_by", "wrote" and so on, so
+    #: the verb has to be translated, not merely reversed.
+    _VERB_TO_RELATION = {
+        "invented": ("invented_by", "inventor"),
+        "discovered": ("discovered_by", "discoverer"),
+        "wrote": ("wrote", "written_by", "author"),
+        "composed": ("composed_by", "composer"),
+        "painted": ("painted_by", "painter"),
+        "founded": ("founded_by", "founder"),
+        "created": ("created_by", "creator"),
+        "built": ("built_by", "builder"),
+        "designed": ("designed_by", "designer"),
+        "developed": ("developed_by", "developer"),
+        "proposed": ("proposed_by", "proposer"),
+        "led": ("led_by", "leader"),
+        "ruled": ("ruled", "ruler"),
+    }
+
+    def _handle_who_verb(self, text: str) -> Optional[Answer]:
+        """Answer "who invented the printing press"."""
+        match = self._WHO_VERB_Q.match(text.strip())
+        if not match:
+            return None
+        verb = match.group(1).lower()
+        thing_text = match.group(2).strip()
+        thing = self.agent.resolve_entity(thing_text)
+        if thing is None:
+            return None
+        candidates = self._VERB_TO_RELATION.get(verb, ())
+        facts = self.agent.kb.facts
+        for relation in candidates:
+            values = [
+                obj
+                for subj, rel, obj, _hv in facts
+                if subj == thing and rel == relation
+            ]
+            if not values:
+                # The fact may be stored the other way round: "who wrote the
+                # Elements" is (Euclid, wrote, the_Elements), where the person
+                # is the subject.
+                values = [
+                    subj
+                    for subj, rel, obj, _hv in facts
+                    if rel == relation and obj == thing
+                ]
+            if values:
+                values = list(dict.fromkeys(values))
+                listing = " and ".join(self._render(v) for v in values)
+                return Answer(
+                    f"{listing}.",
+                    kind="ask",
+                    confidence=1.0,
+                    details=[f"({thing}, {relation}) -> {listing}"],
+                )
+        return None
+
+    #: "when was the printing press invented" -> (printing_press,
+    #: invented_year, 1440). The year lives under a relation derived from the
+    #: verb, so the question has to be mapped rather than looked up directly.
+    _WHEN_Q = re.compile(
+        r"^when\s+(?:was|were|did)\s+(.+?)\s+"
+        r"(invented|discovered|built|founded|written|published|born|signed|"
+        r"completed|created|established)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    _VERB_TO_YEAR_RELATION = {
+        "invented": ("invented_year", "year"),
+        "discovered": ("discovered_year", "year"),
+        "built": ("built_year", "built_year_BCE", "year"),
+        "founded": ("founded_year", "founded_year_BCE", "year"),
+        "written": ("written_year", "year"),
+        "published": ("published_year", "published_year_BCE", "year"),
+        "signed": ("signed_year", "year"),
+        "completed": ("completed_year", "year"),
+        "created": ("created_year", "year"),
+        "established": ("established_year", "year"),
+        "born": ("born_year", "born_year_BCE", "year"),
+    }
+
+    def _handle_when(self, text: str) -> Optional[Answer]:
+        """Answer "when was the printing press invented"."""
+        match = self._WHEN_Q.match(text.strip())
+        if not match:
+            return None
+        thing_text, verb = match.group(1).strip(), match.group(2).lower()
+        thing = self.agent.resolve_entity(thing_text)
+        if thing is None:
+            return None
+        for relation in self._VERB_TO_YEAR_RELATION.get(verb, ()):  # type: ignore[arg-type]
+            values = [
+                obj
+                for subj, rel, obj, _hv in self.agent.kb.facts
+                if subj == thing and rel == relation
+            ]
+            if values:
+                values = list(dict.fromkeys(values))
+                listing = " and ".join(self._render(v) for v in values)
+                label = "BCE" if relation.endswith("BCE") else ""
+                text_out = f"{listing} {label}".strip()
+                return Answer(
+                    f"{text_out}.",
+                    kind="ask",
+                    confidence=1.0,
+                    details=[f"({thing}, {relation}) -> {listing}"],
+                )
+        return None
+
+    def _handle_relation_question(self, text: str) -> Optional[Answer]:
+        """Answer "what is the largest ocean" when the relation is the topic.
+
+        "what is the largest ocean" names no subject. The knowledge is stored as
+        ("Pacific", "largest_ocean", "yes"), so the question is really "which
+        subject has this property true". Only facts whose object is an
+        affirmation qualify -- otherwise "what is the capital of France" would be
+        swallowed here as "the relation 'capital_of'" and answered with a city.
+        """
+        match = re.match(
+            r"^(?:what|which)\s+(?:is|are)\s+(?:the\s+)?(.+?)\s*\??$",
+            text.strip(), re.IGNORECASE,
+        )
+        if not match:
+            return None
+        # "<relation> of <subject>" is a *lookup*, not a relation question. It
+        # must reach _answer_attribute, which knows the subject. Claiming it
+        # here answered "what is the atomic number of gold" with "hydrogen",
+        # the subject of whichever fact happened to be scanned first.
+        if re.search(r"\b(?:of|for)\b", match.group(1), re.IGNORECASE):
+            return None
+        relation = self.agent.resolve_relation(match.group(1))
+        if relation is None:
+            return None
+        subjects = [
+            subj
+            for subj, rel, obj, _hv in self.agent.kb.facts
+            if rel == relation and obj in _AFFIRMATIVE
+        ]
+        if not subjects:
+            return None
+        subjects = list(dict.fromkeys(subjects))
+        listing = ", ".join(self._render(x) for x in subjects)
+        return Answer(
+            f"{listing}.",
+            kind="ask",
+            confidence=1.0,
+            details=[f"subjects where ({relation}) holds: {listing}"],
+        )
+
     def _handle_phrase_lookup(self, text: str) -> Optional[Answer]:
         """Answer 'what is the <relation> for <subject>' without mistaking a
         preposition for the relation.
@@ -791,7 +979,12 @@ class Reasoner:
         )
         if not match:
             return None
-        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        if match.group(1) is not None:
+            relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        elif match.group(3) is not None:
+            relation_text, subject_text = match.group(3).strip(), match.group(4).strip()
+        else:
+            relation_text, subject_text = match.group(5).strip(), match.group(6).strip()
         subject = self.agent.resolve_entity(subject_text)
         if subject is None:
             return None
@@ -805,7 +998,7 @@ class Reasoner:
         if not hits:
             return None
         return Answer(
-            f"{hits[0][0]}",
+            f"{self._render(hits[0][0])}",
             kind="ask",
             confidence=1.0,
             details=[f"memory: ({subject}, {relation}) -> {hits[0][0]}"],
@@ -861,22 +1054,33 @@ class Reasoner:
         subject_text, relation_text = match.group(1).strip(), match.group(2).strip()
         subject = self.agent.resolve_entity(subject_text)
         relation = self.agent.resolve_relation(relation_text)
-        if subject is None or relation is None:
-            return None
 
-        # "what is Paris the capital of?" -> Paris is the capital of France.
-        # The fact is stored (Paris, capital_of, France), so the answer is the
-        # OBJECT of a fact whose SUBJECT is Paris. Reading it the other way
-        # round finds nothing, which is what the first version did.
+        # The stored direction decides the reading. "capital_of" is stored
+        # (Paris, capital_of, France), so "what is Paris the capital of" asks
+        # for the object and "what is France the capital of" asks for the
+        # subject -- the question cannot tell you which without the data.
+        if relation is None:
+            return None
+        if subject is None:
+            return None
+        facts = self.agent.kb.facts
         values = [
-            fact_object
-            for fact_subject, fact_relation, fact_object, _hv in self.agent.kb.facts
-            if fact_relation == relation and fact_subject == subject
+            obj
+            for subj, rel, obj, _hv in facts
+            if rel == relation and subj == subject
         ]
+        inverted = [
+            subj
+            for subj, rel, obj, _hv in facts
+            if rel == relation and obj == subject and subj != subject
+        ]
+        # Prefer the direction that has data; if both do, answer both readings.
+        values = list(dict.fromkeys(values))
+        if not values and inverted:
+            values = list(dict.fromkeys(inverted))
         if not values:
             return None
-        values = list(dict.fromkeys(values))
-        pretty = " and ".join(v.replace("_", " ") for v in values)
+        pretty = " and ".join(self._render(v) for v in values)
         return Answer(
             f"{pretty}.",
             kind="reverse",
@@ -979,7 +1183,7 @@ class Reasoner:
         for relation, obj, _conf in facts:
             if relation == "name":
                 continue
-            lines.append(f"  {relation.replace('_', ' ')}: {obj.replace('_', ' ')}")
+            lines.append(f"  {self._render(relation)}: {self._render(obj)}")
         return Answer(
             "\n".join(lines),
             kind="identity",
@@ -1247,6 +1451,12 @@ class Reasoner:
         )
 
     _COUNT_Q = re.compile(
+        # "how many planets does the solar system have" / "how many planets are
+        # in the solar system": the relation is a plural noun and the subject
+        # follows it. All three forms put (relation, subject) in groups 1/2,
+        # 3/4 or 5/6 so one body can serve them.
+        r"^how\s+many\s+(\w+)\s+(?:does|do)\s+(?:the\s+)?(.+?)\s+have\s*\??$|"
+        r"^how\s+many\s+(\w+)\s+(?:are|is)\s+(?:there\s+)?(?:in|on)\s+(?:the\s+)?(.+?)\s*\??$|"
         r"^how\s+many\s+(.+?)\s+do\s+you\s+know\s+about\s+(?:the\s+)?(.+?)\s*\??$|"
         r"^how\s+many\s+facts\s+do\s+you\s+know\s*\??$",
         re.IGNORECASE,
@@ -1257,14 +1467,21 @@ class Reasoner:
         match = self._COUNT_Q.match(text.strip())
         if not match:
             return None
-        if match.group(2) is None:
+        # The subject sits in group 2, 4 or 6 depending on which alternation
+        # matched; the bare "how many facts" form has none of them.
+        if all(match.group(i) is None for i in (2, 4, 6)):
             return Answer(
                 f"I have {len(self.agent.kb)} facts written.",
                 kind="count",
                 confidence=1.0,
                 details=["counted len(kb)"],
             )
-        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        if match.group(1) is not None:
+            relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        elif match.group(3) is not None:
+            relation_text, subject_text = match.group(3).strip(), match.group(4).strip()
+        else:
+            relation_text, subject_text = match.group(5).strip(), match.group(6).strip()
         subject = self.agent.resolve_entity(subject_text)
         if subject is None:
             return Answer(
@@ -1274,6 +1491,15 @@ class Reasoner:
         relation = self.agent.resolve_relation(relation_text)
         all_facts = self.agent.kb.facts_about(subject)
         named = [o for r, o, _c in all_facts if relation and r == relation]
+        # A counted relation stores the number as the object ("8"), so answer the
+        # value rather than listing it as though it were a name.
+        if relation and len(named) == 1 and named[0].replace("-", "").isdigit():
+            return Answer(
+                f"{named[0]}.",
+                kind="count",
+                confidence=1.0,
+                details=[f"({subject}, {relation}) -> {named[0]}"],
+            )
         if relation:
             return Answer(
                 f"{len(named)}: " + (", ".join(o.replace("_", " ") for o in named) or "none"),

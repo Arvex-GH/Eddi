@@ -273,7 +273,34 @@ eddi-gui                    Tkinter desktop app (train, chat, ingest, save)
 `--brain PATH` points at a different brain file (default: `eddi_brain.pkl` in the OS temp dir;
 use `--brain ./eddi_brain.pkl` to keep it next to your project).
 
-### Capability suite
+### Curriculum
+
+Eddi is taught from a registry of topic packs (`eddi/curriculum.py`), each of which is a
+list of `(subject, relation, object)` facts plus prose the language model learns from.
+Subject packs live in `eddi/curriculum_packs/`, one module per subject:
+
+| Pack | Covers |
+|---|---|
+| `core` | Eddi's own design, HDC, the memory hierarchy |
+| `mathematics` | arithmetic, algebra, geometry, number theory, calculus, probability |
+| `science` | physics, astronomy, biology, chemistry |
+| `computing` | languages, systems, data structures, protocols |
+| `reasoning` | logic, method, statistics |
+| `geography` | capitals, rivers, mountains, units |
+
+Every pack is checked before it is taught:
+
+```bash
+python3 -m eddi.curriculum_packs.validate
+```
+
+The validator tokenises each subject, relation and object with the *real* tokeniser and
+rejects any value that splits into more than one token, because such a fact can be stored
+but never retrieved. It also rejects duplicate `(subject, relation)` pairs, where the
+second fact silently overwrites the first. Both checks have caught real defects:
+`19.3_g_per_cm3` split at the decimal point, and `9.81_m_per_s2` did too.
+
+## Capability suite
 
 `python -m eddi.eval_questions` runs **104 questions across 70 distinct
 abilities** — lookup, reverse lookup, comparison, counting, analogy, chaining,
