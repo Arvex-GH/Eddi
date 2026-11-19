@@ -21,11 +21,13 @@ from typing import List, Optional
 from . import __version__, curriculum, evaluation
 from .agent import EddiAgent
 from .paths import default_brain_path, find_core_binary
+from .language import tokenize
 from .training import (
     TrainingConfig,
     brain_exists,
     load_brain,
     save_brain,
+    suggest_order,
     train,
 )
 
@@ -102,18 +104,29 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_train(args: argparse.Namespace) -> int:
+    # "--order 0" means "choose the depth this much corpus can support". A fixed
+    # default of 3 is wrong as soon as the curriculum is big enough for a 4-gram
+    # to be reliable, and a shallow model answers with confidently spliced
+    # sentences rather than admitting it has too little context.
+    order = args.order
+    if not order:
+        prose = curriculum.all_prose(
+            tuple(args.pack) if args.pack else curriculum.ALL_PACKS
+        )
+        order = suggest_order(len(tokenize(" ".join(prose))))
+        print(f"· corpus supports order {order}")
     config = TrainingConfig(
         packs=tuple(args.pack) if args.pack else curriculum.ALL_PACKS,
         corpus_dirs=tuple(args.corpus or ()),
         corpus_glob=args.corpus_glob,
         epochs=args.epochs,
-        order=args.order,
+        order=order,
         evaluate=not args.no_eval,
         prune_min_count=args.prune,
         save_path=args.brain or default_brain_path(),
         max_corpus_tokens=args.max_tokens,
     )
-    agent = EddiAgent(lm_order=args.order, persist_context=False)
+    agent = EddiAgent(lm_order=order, persist_context=False)
     try:
         report = train(agent, config, verbose=True)
         print()
@@ -280,7 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--corpus", action="append", help="directory of text files to learn (repeatable)")
     parser.add_argument("--corpus-glob", default="*.txt", help="file pattern for --corpus (default *.txt)")
     parser.add_argument("--epochs", type=int, default=3, help="training passes over the corpus (default 3)")
-    parser.add_argument("--order", type=int, default=3, help="context length + 1 (default 3)")
+    parser.add_argument("--order", type=int, default=0,
+                        help="context length + 1, or 0 to size it to the corpus (default 0)")
     parser.add_argument("--max-tokens", type=int, default=2_000_000, help="corpus token budget")
     parser.add_argument("--prune", type=int, default=1, help="drop n-grams seen fewer than N times")
     parser.add_argument("--no-eval", action="store_true", help="skip the held-out benchmark during training")
