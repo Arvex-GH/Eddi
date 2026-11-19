@@ -183,6 +183,16 @@ class TestLanguageModel(unittest.TestCase):
         preds = [t for t, _ in lm.predict(["fast"], 6)]
         self.assertTrue(preds)
 
+    def test_fast_generation_path_matches_full_distribution(self):
+        lm = NGramLanguageModel(order=3)
+        for sentence in ("the cat sat on the mat", "the cat sat again", "a dog sat on a log"):
+            lm.train_text(sentence)
+        full = sorted(lm.distribution(["the", "cat"]).items(), key=lambda kv: -kv[1])[:3]
+        fast = lm.distribution_top(["the", "cat"], limit=64)
+        fast_ids = sorted(fast, key=lambda tid: -fast[tid])[:3]
+        self.assertEqual([tid for tid, _ in full], fast_ids)
+        self.assertAlmostEqual(sum(fast.values()), 1.0, places=6)
+
     def test_greedy_decoding_is_deterministic(self):
         lm = NGramLanguageModel(order=3)
         for _ in range(3):

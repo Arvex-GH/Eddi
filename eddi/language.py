@@ -227,6 +227,63 @@ class NGramLanguageModel:
             or {}
         )
 
+    def _level_top(self, ids: List[int], typed: List[int], n: int, limit: int) -> Dict[int, float]:
+        """Top ``limit`` continuations of one order, without touching the whole vocab."""
+        if n == 0:
+            token_dist = self.counts[0].get(("t",))
+            type_dist = self.counts[0].get(("y",))
+        else:
+            if len(ids) < n or len(typed) < n:
+                return {}
+            token_dist = self.counts[n].get(("t", *ids[-n:]))
+            type_dist = self.counts[n].get(("y", *typed[-n:]))
+        merged: Dict[int, float] = {}
+        for dist, weight_scale in ((token_dist, 1.0 - self.type_weight), (type_dist, self.type_weight)):
+            if not dist:
+                continue
+            total = sum(dist.values())
+            if total <= 0:
+                continue
+            for tid, count in dist.items():
+                merged[tid] = merged.get(tid, 0.0) + weight_scale * (count / total)
+        if len(merged) <= limit:
+            return merged
+        # the interpolation below only needs the strongest candidates
+        best = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[: limit * 2]
+        return dict(best)
+
+    def distribution_top(self, context: Sequence[str], limit: int = 64) -> Dict[int, float]:
+        """Like :meth:`distribution` but only over the top ``limit`` candidates.
+
+        Generating one token only needs the plausible continuations, so this
+        avoids materialising (and normalising) a 10k+ entry vocabulary on every
+        step - roughly two orders of magnitude faster for generation.
+        """
+        ids = self._ids(context)
+        typed = self._ids([word_type(t) for t in context])
+        dist = self._level_top(ids, typed, 0, limit)
+        if not dist:
+            return {}
+        max_order = min(self.order - 1, len(ids))
+        for n in range(1, max_order + 1):
+            level = self._level_top(ids, typed, n, limit)
+            if not level:
+                continue
+            counts = self._raw_counts(ids, typed, n)
+            total = sum(counts.values()) if counts else 0
+            if total <= 0:
+                continue
+            alpha = min(0.9, ABSOLUTE_DISCOUNT * len(counts) / total)
+            lower_mass = sum(dist.values()) or 1.0
+            merged: Dict[int, float] = {tid: (1.0 - alpha) * p for tid, p in level.items()}
+            for tid, p in dist.items():
+                merged[tid] = merged.get(tid, 0.0) + alpha * (p / lower_mass)
+            dist = merged
+            if len(dist) > limit * 4:
+                dist = dict(sorted(dist.items(), key=lambda kv: kv[1], reverse=True)[: limit * 2])
+        total = sum(dist.values())
+        return {tid: p / total for tid, p in dist.items()} if total > 0 else dist
+
     def predict(self, context: Sequence[str], top_k: int = 5) -> List[Tuple[str, float]]:
         dist = self.distribution(context)
         ranked = sorted(dist.items(), key=lambda kv: kv[1], reverse=True)
@@ -263,7 +320,7 @@ class NGramLanguageModel:
         skip = {self.vocab[BOS]}
         recent: List[int] = []
         for _ in range(max_tokens):
-            dist = self.distribution(out)
+            dist = self.distribution_top(out, limit=max(32, top_k * 4))
             if not dist:
                 break
             if temperature > 0:
