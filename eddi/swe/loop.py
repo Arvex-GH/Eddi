@@ -89,6 +89,57 @@ class Attempt:
     ok: bool = True
 
 
+
+
+
+
+def _bottom_up(toolbox, edits: list) -> list:
+    """Order edits so that earlier ones cannot disturb later ones.
+
+    Only edits to the same file can interfere, and only when one edit's `new`
+    text contains another's `old`. Ordering by the position of `old` in the
+    current file, descending, is what makes a set of edits behave like one
+    atomic decision.
+    """
+    def position(edit):
+        path, old, _new = edit
+        result = toolbox.read(path, budget=200000)
+        if not result.ok:
+            return -1
+        return result.text.find(old)
+
+    indexed = list(enumerate(edits))
+    indexed.sort(key=lambda pair: (pair[1][0], -position(pair[1])))
+    return [edit for _index, edit in indexed]
+
+@dataclass
+class _EditOutcome:
+    """The minimum of ToolResult that the loop uses after editing."""
+
+    ok: bool
+    text: str
+
+
+def _as_edits(proposal) -> list:
+    """Normalise a proposal to a list of (path, old, new) triples.
+
+    The single-edit tuple is the common case and stays the documented shape;
+    the sequence form exists for decisions that are inherently plural.
+    """
+    if proposal is None:
+        return []
+    if isinstance(proposal, tuple) and len(proposal) == 3 and all(
+        isinstance(part, str) for part in proposal
+    ):
+        return [proposal]
+    edits = []
+    for item in proposal:
+        if isinstance(item, tuple) and len(item) == 3 and all(
+            isinstance(part, str) for part in item
+        ):
+            edits.append(item)
+    return edits
+
 @dataclass
 class TaskState:
     """Everything the loop has learned about one task so far."""
@@ -418,10 +469,31 @@ class EngineeringLoop:
                 state.note(Step.EDIT, f"iteration {iteration}: no edit proposed", ok=False)
                 return state
 
-            path, old, new = proposal
-            result = self.tools.edit(path, old, new)
-            state.note(Step.EDIT, f"{path}: {result.text}", ok=result.ok)
-            self._say(Step.EDIT, f"{path}: {result.text}")
+            # A decision may need more than one edit. Swapping two function
+            # bodies is a single thought and two line replacements, and forcing
+            # it through a one-edit interface loses half of it: the loop
+            # re-localises after the first and never learns the second, leaving
+            # the file in a state no single line can describe. Accepting a
+            # sequence keeps one decision atomic without weakening the rule
+            # that each edit inside it is small and exact.
+            edits = _as_edits(proposal)
+            if not edits:
+                state.note(Step.EDIT, f"iteration {iteration}: unusable proposal", ok=False)
+                return state
+            failed = False
+            # Apply in reverse document order, per file. A set of edits decided
+            # against one state of the file can invalidate itself: swapping two
+            # bodies means the first replacement makes the second `old` string
+            # ambiguous or absent. Working bottom-up keeps every `old` valid
+            # relative to the text it was chosen from.
+            for path, old, new in _bottom_up(self.tools, edits):
+                result = self.tools.edit(path, old, new)
+                state.note(Step.EDIT, f"{path}: {result.text}", ok=result.ok)
+                self._say(Step.EDIT, f"{path}: {result.text}")
+                if not result.ok:
+                    failed = True
+                    break
+            result = _EditOutcome(not failed, "")
             if not result.ok:
                 # A failed edit is a failed prediction about the file; the loop
                 # keeps the information and tries again with fresh evidence.

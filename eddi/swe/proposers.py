@@ -270,7 +270,7 @@ class HeuristicProposer:
                 f"    if {arg.arg} is None:\n"
                 f"        {arg.arg} = {literal}\n"
             )
-            return Proposal.with_body_guard(view, old_sig, new_sig, arg.arg, literal, guard)
+            return _ProposalFactory.with_body_guard(view, old_sig, new_sig, arg.arg, literal, guard)
         return None
 
     def _suffix_slice_mismatch(self, view: FunctionView) -> Optional[Proposal]:
@@ -477,14 +477,16 @@ def _flip_compare_in_text(text: str) -> Optional[str]:
     return None
 
 
-class Proposal:
-    path: str
-    old: str
-    new: str
-    reason: str = ""
+@dataclass
+class _ProposalFactory:
+    """Namespace for the one proposal constructor that needs a whole view.
 
-    def __init__(self, path: str, old: str, new: str, reason: str = ""):
-        self.path, self.old, self.new, self.reason = path, old, new, reason
+    There used to be two ``Proposal`` classes in this module -- a dataclass at
+    the top and a hand-written copy further down that shadowed it. Everything
+    worked because both had the same four fields, which is exactly the kind of
+    accident that breaks the day someone changes one of them. The constructor
+    now lives on its own object and there is a single Proposal.
+    """
 
     @classmethod
     def with_body_guard(cls, view, old_sig, new_sig, arg, literal, guard):
@@ -529,7 +531,7 @@ class Proposal:
             "    " + row[base:] for row in guard.rstrip("\n").splitlines()
         ]
         rows[insert_at:insert_at] = guard_rows
-        return cls(
+        return Proposal(
             view.path,
             source,
             "\n".join(rows) + "\n",

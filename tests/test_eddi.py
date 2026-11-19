@@ -927,3 +927,199 @@ class TestStemmerBenchmark(unittest.TestCase):
         )
         self.assertNotEqual(outcome.returncode, 0)
         self.assertIn("study", outcome.stderr)
+
+
+class TestLLMProposer(unittest.TestCase):
+    """The model is consulted for one narrow decision and must fail safely."""
+
+    def _workspace(self, files):
+        root = tempfile.mkdtemp()
+        for relative, body in files.items():
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+        return root
+
+    def _state(self, root, files):
+        from eddi.swe.loop import Probe, TaskState
+
+        state = TaskState(goal="the issue", probes=[Probe("python3 -c pass")])
+        state.files_read = list(files)
+        from eddi.swe.tools import Toolbox
+
+        return state, Toolbox(root)
+
+    SOURCE = "def area(w, h):\n    return w + h\n"
+
+    def test_a_verbatim_line_is_accepted(self):
+        from eddi.swe.llm import proposal_from_reply
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        proposal = proposal_from_reply(
+            {"strategy": "novel", "old": "    return w + h", "new": "    return w * h"},
+            toolbox,
+            state,
+        )
+        self.assertEqual(proposal, ("geometry.py", "    return w + h", "    return w * h"))
+
+    def test_a_line_that_is_not_in_the_file_is_rejected(self):
+        from eddi.swe.llm import proposal_from_reply
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        proposal = proposal_from_reply(
+            {"strategy": "novel", "old": "    return 42", "new": "    return 43"},
+            toolbox,
+            state,
+        )
+        self.assertIsNone(proposal)
+
+    def test_novel_is_not_a_refusal(self):
+        from eddi.swe.llm import proposal_from_reply
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        proposal = proposal_from_reply(
+            {"strategy": "novel", "old": "    return w + h", "new": "    return w * h"},
+            toolbox,
+            state,
+        )
+        self.assertIsNotNone(proposal)
+
+    def test_an_empty_edit_is_a_refusal(self):
+        from eddi.swe.llm import proposal_from_reply
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        self.assertIsNone(
+            proposal_from_reply({"strategy": "novel", "old": "", "new": ""}, toolbox, state)
+        )
+
+    def test_a_plural_decision_returns_several_edits(self):
+        from eddi.swe.llm import proposal_from_reply
+
+        source = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
+        root = self._workspace({"m.py": source})
+        state, toolbox = self._state(root, ["m.py"])
+        proposal = proposal_from_reply(
+            {
+                "strategy": "novel",
+                "edits": [
+                    {"path": "m.py", "old": "    return 1", "new": "    return 2"},
+                    {"path": "m.py", "old": "    return 2", "new": "    return 1"},
+                ],
+            },
+            toolbox,
+            state,
+        )
+        self.assertIsInstance(proposal, list)
+        self.assertEqual(len(proposal), 2)
+
+    def test_fenced_json_is_parsed(self):
+        from eddi.swe.llm import parse_reply
+
+        payload = parse_reply('Here you go:\n```json\n{"old": "a", "new": "b"}\n```')
+        self.assertEqual(payload["old"], "a")
+
+    def test_a_broken_reply_is_not_an_exception(self):
+        from eddi.swe.llm import LLMProposer
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        proposer = LLMProposer(complete=lambda system, user: "I am not sure.")
+        self.assertIsNone(proposer(state, toolbox))
+
+    def test_a_model_that_raises_does_not_break_the_loop(self):
+        from eddi.swe.llm import LLMProposer
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+
+        def explode(system, user):
+            raise RuntimeError("server down")
+
+        self.assertIsNone(LLMProposer(complete=explode)(state, toolbox))
+
+    def test_the_prompt_stays_narrow(self):
+        from eddi.swe.llm import LLMProposer, build_prompt
+
+        root = self._workspace({"geometry.py": self.SOURCE})
+        state, toolbox = self._state(root, ["geometry.py"])
+        prompt = build_prompt(state, toolbox)
+        self.assertIn("ISSUE", prompt)
+        self.assertIn("def area", prompt)
+        self.assertLess(len(prompt.splitlines()), 60)
+
+
+class TestHybridProposer(unittest.TestCase):
+    """Structure first; the model is a fallback, not a dependency."""
+
+    def test_a_heuristic_hit_never_calls_the_model(self):
+        from eddi.swe.llm import HybridProposer
+
+        calls = []
+
+        def model(state, toolbox):
+            calls.append(1)
+            return None
+
+        hybrid = HybridProposer(heuristic=lambda s, t: ("a.py", "x", "y"), model=model)
+        self.assertEqual(hybrid(None, None), ("a.py", "x", "y"))
+        self.assertEqual(calls, [])
+        self.assertEqual(hybrid.model_calls, 0)
+
+    def test_a_heuristic_miss_delegates(self):
+        from eddi.swe.llm import HybridProposer
+
+        hybrid = HybridProposer(
+            heuristic=lambda s, t: None,
+            model=lambda s, t: ("b.py", "p", "q"),
+        )
+        self.assertEqual(hybrid(None, None), ("b.py", "p", "q"))
+        self.assertEqual(hybrid.model_calls, 1)
+
+
+class TestPluralEdits(unittest.TestCase):
+    """A decision can be several edits, and they must not invalidate each other."""
+
+    SOURCE = "def area():\n    return 1\n\n\ndef perimeter():\n    return 2\n"
+
+    def test_swapping_two_bodies_is_one_decision(self):
+        from eddi.swe.loop import EngineeringLoop, TaskState
+        from eddi.swe.tools import Toolbox
+
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "m.py"), "w", encoding="utf-8") as handle:
+            handle.write(self.SOURCE)
+
+        def propose(state, toolbox):
+            # Each snippet carries the signature it belongs to, so it matches
+            # exactly once. A bare "return 1" appears in both bodies and the
+            # edit tool refuses it -- correctly, since it cannot know which
+            # body was meant.
+            return [
+                ("m.py", "def area():\n    return 1", "def area():\n    return 2"),
+                ("m.py", "def perimeter():\n    return 2", "def perimeter():\n    return 1"),
+            ]
+
+        # The loop localises before it proposes, so the goal has to name
+        # something it can find. Real issues do; this test should too.
+        loop = EngineeringLoop(Toolbox(root), propose=propose, verbose=False)
+        state = TaskState(goal="`area` and `perimeter` have swapped bodies", probes=[])
+        loop.run(state)
+        with open(os.path.join(root, "m.py"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("def area():\n    return 2", text)
+        self.assertIn("def perimeter():\n    return 1", text)
+
+    def test_a_single_tuple_still_works(self):
+        from eddi.swe.loop import _as_edits
+
+        self.assertEqual(_as_edits(("a.py", "x", "y")), [("a.py", "x", "y")])
+        self.assertEqual(_as_edits(None), [])
+        self.assertEqual(
+            _as_edits([("a.py", "x", "y"), ("b.py", "p", "q")]),
+            [("a.py", "x", "y"), ("b.py", "p", "q")],
+        )

@@ -22,7 +22,24 @@ from .proposers import HeuristicProposer
 from .tools import Toolbox
 
 
-def _solver_factory(use_proposer: bool, verbose: bool = False):
+def _proposer(use_proposer: bool, model: str = ""):
+    """Structure first, model only for what structure cannot name.
+
+    With no model configured this is exactly the heuristic proposer, so the
+    measured seven-of-nine behaviour is the default and a server is an upgrade
+    rather than a dependency.
+    """
+    if not use_proposer:
+        return None
+    heuristic = HeuristicProposer()
+    if not model:
+        return heuristic
+    from .llm import HybridProposer, LLMProposer, http_complete
+
+    return HybridProposer(heuristic=heuristic, model=LLMProposer(complete=http_complete(model)))
+
+
+def _solver_factory(use_proposer: bool, verbose: bool = False, model: str = ""):
     """Build the callable the benchmark invokes on each materialised task."""
 
     def solve(root: Path):
@@ -33,7 +50,7 @@ def _solver_factory(use_proposer: bool, verbose: bool = False):
         state = TaskState(goal=task.goal, probes=[Probe(task.probe)])
         loop = EngineeringLoop(
             toolbox,
-            propose=HeuristicProposer() if use_proposer else None,
+            propose=_proposer(use_proposer, model),
             verbose=verbose,
         )
         loop.run(state)
@@ -77,7 +94,7 @@ def cmd_solve(args: argparse.Namespace) -> int:
     state = TaskState(goal=args.goal or "", probes=probes)
     loop = EngineeringLoop(
         toolbox,
-        propose=HeuristicProposer() if not args.no_proposer else None,
+        propose=_proposer(not args.no_proposer, args.model),
         verbose=True,
         max_iterations=args.iterations,
     )
@@ -98,6 +115,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                        help="compare the loop alone against the loop with a proposer")
     bench.add_argument("--show-tests", action="store_true",
                        help="leave the visible tests in place (easier mode)")
+    bench.add_argument("--model", default="",
+                       help="local model id; runs the hybrid proposer")
     bench.set_defaults(func=cmd_bench)
 
     solve = sub.add_parser("solve", help="run the loop on a real repository")
@@ -108,6 +127,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     solve.add_argument("--iterations", type=int, default=8)
     solve.add_argument("--no-proposer", action="store_true",
                        help="localise and report without proposing edits")
+    solve.add_argument("--model", default="",
+                       help="local model id; enables the model-backed proposer")
     solve.set_defaults(func=cmd_solve)
 
     args = parser.parse_args(argv)
