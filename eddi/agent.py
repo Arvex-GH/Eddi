@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .context import TieredContext1M
 from .hdc import WritableKnowledgeBase, normalise_symbol
 from .language import NGramLanguageModel, tokenize
+from .memory import ChunkMemory
 from .paths import default_context_path
 
 _ZERO_WIDTH_RE = re.compile("[\u200b\u200c\u200d\ufeff]")
@@ -21,6 +22,18 @@ def _token_hash(token: str) -> int:
     )
 
 
+#: Reply kinds that carry no information worth remembering.
+_NON_ANSWERS = frozenset({
+    "remembered", "greeting", "help", "noop", "identity",
+    # Refusals are boilerplate. Filing them stores the same sentence over and
+    # over and teaches the store to answer unknown things with "I don't know".
+    "unknown", "math_error", "convert_error",
+    # A retrieved chunk is *already* in the store. Filing it again as a reply
+    # duplicates it and drags its source text along ("... (from question)").
+    "memory",
+})
+
+
 class EddiAgent:
     """The public brain.
 
@@ -28,7 +41,7 @@ class EddiAgent:
 
     * :class:`WritableKnowledgeBase` - writable hyperdimensional facts
     * :class:`NGramLanguageModel` - trained interpolated language model
-    * :class:`TieredContext1M` - 1M-token disk-backed context (L1 RAM + L2 mmap)
+    * :class:`~eddi.memory.ChunkMemory` - verbatim text the agent can quote back
     * :class:`~eddi.reasoning.Reasoner` - question routing and composition
     """
 
@@ -40,6 +53,8 @@ class EddiAgent:
         lm_order: int = 3,
         brain_path: Optional[str] = None,
         autosave: bool = False,
+        memory_path: Optional[str] = None,
+        record_turns: bool = True,
     ):
         self.kb = WritableKnowledgeBase()
         self.lm = NGramLanguageModel(order=lm_order)
@@ -52,10 +67,20 @@ class EddiAgent:
         self._brain_path = brain_path
         self._autosave = autosave
         self._dirty = False
+        # Verbatim memory. Unlike TieredContext1M this one stores real text and
+        # is queried while answering; see eddi/memory.py for why that matters.
+        self.memory = ChunkMemory(path=memory_path, auto_load=True)
+        self._record_turns = record_turns
 
     # ---------------------------------------------------------------- context
     @property
     def ctx(self) -> TieredContext1M:
+        """Legacy hash-ring store.
+
+        Kept only so old callers do not break. It stores no text and nothing
+        reads it back, so it is not memory: :attr:`memory` is. Do not advertise
+        this as a context window.
+        """
         if self._ctx is None:
             self._ctx = TieredContext1M(path=self._context_path, max_tokens=self._max_tokens)
         return self._ctx
@@ -83,6 +108,10 @@ class EddiAgent:
         for i in range(1, len(tokens)):
             self.transitions.setdefault((tokens[i - 1],), Counter())[tokens[i]] += 1
         self.lm.train_text(text)
+        # The old context store keyed on persist_context and was off by default,
+        # so ingest reported success while storing nothing. Verbatim memory is
+        # the one that must always keep the text.
+        self.memory.add(text, source="ingest")
         self._dirty = True
         return len(tokens)
 
@@ -128,9 +157,51 @@ class EddiAgent:
         hits = self.kb.query(subject, relation)
         return [f"{obj} (confidence={sim:.2f})" for obj, sim in hits]
 
+    def remember(self, text: str, source: str = "") -> int:
+        """Store text verbatim so it can be retrieved later."""
+        self._dirty = True
+        return len(self.memory.add(text, source=source))
+
+    def recall(self, query: str, k: int = 4) -> List:
+        """Retrieve the best-matching stored spans for ``query``."""
+        return self.memory.search(query, k=k)
+
     def answer(self, text: str):
-        """Route a message through the reasoning layer and return an ``Answer``."""
-        return self.reasoner.answer(text)
+        """Route a message through the reasoning layer and return an ``Answer``.
+
+        Every exchange is written to verbatim memory first. Recording is cheap
+        (deterministic indexing, no model) and it means a later question can be
+        answered from something said earlier even when no fact was extracted.
+        """
+        text = (text or "").strip()
+        if not text:
+            return self.reasoner.answer(text)
+        reply = self.reasoner.answer(text)
+        if self._record_turns and reply is not None and reply.text:
+            # Do not store an echo of what we just wrote: it doubles the index
+            # with the same sentence and makes the store look redundant.
+            body = reply.text.split(" (from ")[0].strip()
+            # A memory hit that merely echoes the question adds nothing - it was
+            # already filed as a question and must not come back as an answer.
+            if reply.kind == "memory" and body.lower() == text.lower():
+                body = ""
+            # Only store replies that carry information. Canned acknowledgements
+            # ("Noted - I've stored that.") are the same few sentences every time
+            # and would flood the index with text that answers nothing.
+            if body and body.lower() != text.lower() and reply.kind not in _NON_ANSWERS:
+                self.memory.add(reply.text, source="reply")
+        if self._record_turns and reply is not None:
+            # Record the user's turn *after* answering, so a question can never
+            # retrieve itself. Questions are stored too (they carry context) but
+            # marked so retrieval can skip them: a stored question matches the
+            # next question on every word and answers none of them.
+            if text.endswith("?") or self.reasoner._looks_like_question(text):
+                self.memory.add(text, source="question")
+            elif not self.reasoner._is_small_talk(text):
+                # Chit-chat ("hi", "thanks") has no content to retrieve and, being
+                # one word long, it matches almost any question's greeting word.
+                self.memory.add(text, source="turn")
+        return reply
 
     def generate(
         self,
@@ -193,9 +264,25 @@ class EddiAgent:
             if relation in known:
                 return relation
         key = normalise_symbol(text)
+        known = []
         for relation in self._all_relations():
             if relation[1] == key:
                 return relation[1]
+            known.append(relation[1])
+        unique = list(dict.fromkeys(known))
+        # 'port' should find 'port_default': the stored name is more specific
+        # than the phrase, and there is exactly one candidate.
+        matches = [r for r in unique if r.startswith(key + "_")]
+        if len(matches) == 1:
+            return matches[0]
+        # 'default port' should also find 'port_default'. Try each trailing
+        # word-run, so leading modifiers don't block the match.
+        words = key.split("_")
+        for start in range(1, len(words)):
+            tail = "_".join(words[start:])
+            matches = [r for r in unique if r == tail or r.startswith(tail + "_")]
+            if len(matches) == 1:
+                return matches[0]
         return None
 
     def _all_relations(self):
@@ -227,14 +314,17 @@ class EddiAgent:
         return self.kb.chain(resolved_start, resolved_relations)
 
     def stats(self) -> Dict[str, int]:
-        ctx_count = self._ctx.count if self._ctx is not None else 0
+        # No "context_tokens" key: the hash-ring store never held text and
+        # reporting its (always zero) count invited the false claim that the
+        # agent had a large context window. Memory is the real store.
         return {
             "facts": len(self.kb),
             "symbols": len(self.kb.symbols),
             "lm_vocab": self.lm.vocab_size,
             "lm_order": self.lm.order,
             "trained_tokens": self.lm.trained_tokens,
-            "context_tokens": ctx_count,
+            "memory_chunks": len(self.memory),
+            "memory_tokens": self.memory.total_tokens,
         }
 
     # --------------------------------------------------------------- lifecycle

@@ -21,10 +21,14 @@ so the CLI, desktop UI and tests can show the reasoning trace.
 from __future__ import annotations
 
 import ast
+import datetime
+import math
 import operator
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+from .memory import identifiers_of, terms_of
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_+#']+")
 _MATH_CHARS_RE = re.compile(r"^[\d\s.\+\-\*/%^()×÷,]+$")
@@ -74,6 +78,32 @@ def _inverse_lookup(agent, subject: str, relation: Optional[str]) -> List[str]:
                 continue
             out.append(f"{src_subject} --{src_relation}--> {subject}")
     return out
+
+
+def _query_score_ceiling(memory, query: str) -> float:
+    """The strongest score this query could reach in this store.
+
+    Computed by scoring the query against a synthetic chunk containing every
+    query term - i.e. what a perfect match would look like. Normalising against
+    it makes the acceptance threshold portable across corpus sizes.
+    """
+    terms = terms_of(query)
+    idents = identifiers_of(query)
+    if not terms and not idents:
+        return 0.0
+    n_docs = max(1, len(memory))
+    total = 0.0
+    for term in terms:
+        df = len(memory._postings.get(term, []))
+        if not df:
+            continue
+        total += math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+    # The phrase boost is part of the score the searcher can award, so it has to
+    # be part of the ceiling too - otherwise a phrase hit scores above "perfect"
+    # and the ratio stops meaning anything.
+    if len(" ".join(query.lower().split())) > 8:
+        total += 3.0
+    return total + (6.0 * len(idents))
 
 
 def _keywords(text: str) -> List[str]:
@@ -145,12 +175,22 @@ class Reasoner:
             self._handle_webpage,
             self._handle_identity,
             self._handle_math,
+            self._handle_natural_math,
             self._handle_teach_rule,
             self._handle_teach_alias,
             self._handle_teach,
+            self._handle_tell_about_self,
+            self._handle_ask_about_self,
+            self._handle_birth_year,
             self._handle_chain,
             self._handle_analogy,
             self._handle_relations,
+            self._handle_false_premise,
+            self._handle_phrase_lookup,
+            self._handle_types_of,
+            self._handle_compare,
+            self._handle_count,
+            self._handle_reverse,
             self._handle_ask,
             self._handle_about,
             self._handle_greeting,
@@ -158,7 +198,124 @@ class Reasoner:
             answer = handler(text)
             if answer is not None:
                 return answer
-        return self._handle_generate(text)
+        # Retrieval from memory is the last resort before free-form generation:
+        # structured knowledge wins, and stored text beats a model that will
+        # always say *something* whether or not it knows.
+        return self._handle_memory(text) or self._handle_generate(text)
+
+    # -------------------------------------------------------------- memory
+    # Retrieval over stored text. Deliberately placed *after* the structured
+    # handlers, which are exact, and *before* the language model, which will
+    # always produce something whether or not it knows.
+    _MIN_MEMORY_SCORE = 1.2
+
+    _QUESTION_MARKERS = re.compile(
+        r"\b(?:what|which|who|whom|whose|when|where|why|how|is|are|was|were|"
+        r"does|do|did|can|could|should|would|will)\b",
+        re.IGNORECASE,
+    )
+
+    #: "tell me about water" asks for something just as much as "what is water".
+    _REQUEST_MARKERS = re.compile(
+        r"^\s*(?:tell\s+me|explain|describe|show\s+me|give\s+me|list|"
+        r"what\s+do\s+you\s+know|do\s+you\s+know)\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_question(self, text: str) -> bool:
+        """Distinguish a question from a statement.
+
+        A leading greeting is peeled off first: "Hi! Tell me about water" is a
+        request, not a statement about oneself.
+        """
+        stripped = self._GREETING_OPENERS.sub("", text.strip()).strip(" ,.!")
+        if not stripped:
+            return False
+        if stripped.endswith("?"):
+            return True
+        if self._REQUEST_MARKERS.search(stripped):
+            return True
+        # The interrogative has to *open* the sentence. Matching it anywhere
+        # marks every declarative with a copula as a question: "the sky is blue"
+        # becomes a question, so it is filed as one and can never be recalled.
+        return bool(self._QUESTION_MARKERS.match(stripped))
+
+    def _handle_memory(self, text: str) -> Optional[Answer]:
+        """Answer from verbatim stored text when it matches well enough.
+
+        A retrieval hit is evidence, not proof: the score threshold is what
+        separates "this span is about the question" from "these two chunks share
+        the word 'the'". Below the threshold we return None and let the caller
+        fall through to an honest refusal.
+        """
+        memory = getattr(self.agent, "memory", None)
+        if memory is None or not len(memory):
+            return None
+        if not self._looks_like_question(text):
+            # A statement has just been stored by the caller; matching it against
+            # itself and returning it as an answer is a tautology, not an answer.
+            return Answer(
+                "Noted - I've stored that.",
+                kind="remembered",
+                confidence=1.0,
+                details=["written to verbatim memory"],
+            )
+        hits = memory.search(text, k=5)
+        if not hits:
+            return None
+
+        # A stored question is weak evidence: a previously asked question
+        # resembles the current one closely without containing any answer.
+        def _is_question(chunk) -> bool:
+            return chunk.source in ("question", "reply-question") or chunk.text.strip().endswith("?")
+
+        # Never fall back to question chunks: if the only things that resemble
+        # the query are earlier questions, memory has nothing to say and the
+        # honest answer is to decline.
+        pool = [h for h in hits if not _is_question(h.chunk)]
+        if not pool:
+            return None
+
+        # Acceptance is decided by *coverage*, not by raw score. BM25 magnitudes
+        # depend on corpus size, so any absolute threshold works on one store and
+        # fails on another; and a ratio against the best possible score lets a
+        # chunk through on a single common word. What actually distinguishes a
+        # real match is how much of the question the chunk accounts for.
+        q_terms = set(terms_of(text))
+        q_idents = set(identifiers_of(text))
+        wanted = max(1, len(q_terms))
+        best = None
+        best_cover = 0.0
+        for hit in pool:
+            matched = set(hit.matched_terms) & q_terms
+            coverage = len(matched) / wanted
+            if q_idents and hit.matched_identifiers:
+                coverage = 1.0  # an exact identifier is decisive on its own
+            # A single shared word is not a match. "hi" shares "hi" with
+            # "hi, what is python" and would answer it with a greeting.
+            if len(matched) < 2 and not (q_idents and hit.matched_identifiers):
+                continue
+            if coverage > best_cover:
+                best, best_cover = hit, coverage
+        if best is None or best_cover < 0.34:
+            return None
+        # A question that the fact base could answer is handled earlier; by the
+        # time we are here the knowledge base had nothing, so pass the span on.
+        quoted = best.text.strip()
+        if len(quoted) > 420:
+            quoted = quoted[:420].rsplit(" ", 1)[0] + "..."
+        source = f" (from {best.chunk.source})" if best.chunk.source else ""
+        return Answer(
+            quoted + source,
+            kind="memory",
+            confidence=min(1.0, best.score / 8.0),
+            details=[
+                f"memory chunk #{best.chunk.id}, score {best.score:.2f}",
+                "matched: " + ", ".join(
+                    (best.matched_identifiers + best.matched_terms)[:6]
+                ) if (best.matched_identifiers or best.matched_terms) else "phrase match",
+            ],
+        )
 
     # ------------------------------------------------------------- knowledge
     def _handle_webpage(self, text: str) -> Optional[Answer]:
@@ -255,6 +412,205 @@ class Reasoner:
         extra = f" (+{created - 1} derived by rules)" if created > 1 else ""
         return Answer(f"Learned: ({s}) --{r}--> ({o}){extra}", kind="teach", confidence=1.0)
 
+    # The user has a stable identity in memory, so first-person statements are
+    # knowledge, not questions. Eddi previously treated "I am 16 years old" as a
+    # lookup for the word "years" and answered "I don't know".
+    USER_SUBJECT = "user"
+
+    # Told-back phrasing, not bare nouns: "you live in Frankfurt" reads like
+    # English, "your lives in is Frankfurt" does not.
+    _RELATION_LABEL = {
+        "age": ("your age is", "your age"),
+        "name": ("your name is", "your name"),
+        "occupation": ("your job is", "your job"),
+        "lives_in": ("you live in", "where you live"),
+        "likes": ("you like", "what you like"),
+        "work": ("you work as", "your work"),
+    }
+
+    _SELF_TELL = [
+        # "I am 16 years old"            -> age
+        (re.compile(r"^\s*i\s*am\s+(\d+)\s*(?:years?|yrs?)\s*old\s*[.!]?\s*$", re.I), "age"),
+        # "I am a student" / "I'm an engineer"
+        (re.compile(r"^\s*i\s*(?:'m|\s+am)\s+(?:a|an)\s+(.+?)\s*[.!]?\s*$", re.I), "occupation"),
+        # "I live in Frankfurt"
+        (re.compile(r"^\s*i\s+live\s+in\s+(.+?)\s*[.!]?\s*$", re.I), "lives_in"),
+        # "I like pizza" / "I love Rust"
+        (re.compile(r"^\s*i\s+(?:like|love|enjoy|prefer)\s+(.+?)\s*[.!]?\s*$", re.I), "likes"),
+        # "I work as a nurse" / "I work at Acme"
+        (re.compile(r"^\s*i\s+work\s+(?:as|at)\s+(?:a\s+|an\s+)?(.+?)\s*[.!]?\s*$", re.I), "work"),
+        # "my name is Alex" / "my favourite colour is blue"
+        (re.compile(r"^\s*my\s+name\s+is\s+(.+?)\s*[.!]?\s*$", re.I), "name"),
+        (re.compile(r"^\s*my\s+favou?rite\s+(\w+)\s+is\s+(.+?)\s*[.!]?\s*$", re.I), None),
+        # "I am Alex" (bare, no article) - name, only if it looks like a name
+        (re.compile(r"^\s*[Ii]\s*(?:'m|\s+am)\s+([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*)?)\s*[.!]?\s*$"), "name"),
+    ]
+
+    def _handle_tell_about_self(self, text: str) -> Optional[Answer]:
+        """Remember a fact the user states about themselves.
+
+        Statements, not questions: "I am 16 years old" is something to keep, and
+        answering it with a knowledge lookup was a category error.
+        """
+        for pattern, relation in self._SELF_TELL:
+            match = pattern.match(text)
+            if not match:
+                continue
+            if relation is None:
+                # "my favourite colour is blue" -> favourite_colour
+                relation = "favourite_" + match.group(1).lower()
+                obj = match.group(2)
+                label = "your favourite " + match.group(1).lower() + " is"
+            else:
+                obj = match.group(1)
+                told, _ = self._RELATION_LABEL.get(
+                    relation, (f"your {relation.replace('_', ' ')} is", relation)
+                )
+                label = told
+            obj = obj.strip(" .!")
+            if not obj:
+                continue
+            # Speaking a fact twice should not duplicate it.
+            existing = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, relation)]
+            if any(obj.lower() == e.lower() for e in existing):
+                return Answer(
+                    f"I already knew that {label} {obj}.",
+                    kind="remember",
+                    confidence=1.0,
+                )
+            self.agent.teach(self.USER_SUBJECT, relation, obj)
+            return Answer(
+                f"Got it - I'll remember that {label} {obj}.",
+                kind="remember",
+                confidence=1.0,
+                details=[f"memory: ({self.USER_SUBJECT}, {relation}, {obj})"],
+            )
+        return None
+
+    _SELF_ASK = [
+        (re.compile(r"\bhow\s+old\s+am\s+i\b|\bwhat(?:'s|\s+is)\s+my\s+age\b", re.I), "age"),
+        (re.compile(r"\bwhat(?:'s|\s+is)\s+my\s+name\b|\bwho\s+am\s+i\b", re.I), "name"),
+        (re.compile(r"\bwhere\s+do\s+i\s+live\b", re.I), "lives_in"),
+        (re.compile(r"\bwhat\s+do\s+i\s+do\b|\bwhat(?:'s|\s+is)\s+my\s+(?:job|occupation)\b", re.I), "occupation"),
+        (re.compile(r"\bwhat\s+do\s+i\s+like\b", re.I), "likes"),
+        # "what is my favourite colour" -> favourite_colour
+        (re.compile(r"\bwhat(?:'s|\s+is)\s+my\s+favou?rite\s+(\w+)\b", re.I), "favourite_*"),
+    ]
+
+    # How to say each fact back to the user.
+    _ANSWER_PHRASE = {
+        "age": lambda v: f"You're {v}.",
+        "name": lambda v: f"Your name is {v}.",
+        "lives_in": lambda v: f"You live in {v}.",
+        "occupation": lambda v: f"You're a {v}.",
+        "likes": lambda v: f"You like {v}.",
+        "work": lambda v: f"You work as {v}.",
+    }
+
+    def _handle_ask_about_self(self, text: str) -> Optional[Answer]:
+        """Answer questions about the user from the facts they told Eddi.
+
+        Remembering would be pointless if it could not be recalled, so this is
+        the other half of _handle_tell_about_self.
+        """
+        for pattern, relation in self._SELF_ASK:
+            match = pattern.search(text)
+            if not match:
+                continue
+            if relation == "favourite_*":
+                thing = match.group(1).lower()
+                relation = "favourite_" + thing
+                unknown_msg = f"I don't know your favourite {thing} yet - tell me and I'll remember."
+                answer_phrase = lambda v, _t=thing: f"Your favourite {_t} is {v}."
+            else:
+                _, topic = self._RELATION_LABEL.get(
+                    relation, ("", f"your {relation.replace('_', ' ')}")
+                )
+                unknown_msg = f"I don't know {topic} yet - tell me and I'll remember."
+                answer_phrase = self._ANSWER_PHRASE.get(
+                    relation, lambda v: f"Your {relation.replace('_', ' ')} is {v}."
+                )
+
+            hits = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, relation)]
+            if not hits:
+                return Answer(
+                    unknown_msg,
+                    kind="unknown",
+                    details=[f"no fact stored for ({self.USER_SUBJECT}, {relation})"],
+                )
+            return Answer(
+                answer_phrase(hits[0]),
+                kind="about_self",
+                confidence=1.0,
+                details=[f"memory: ({self.USER_SUBJECT}, {relation})"],
+            )
+        return None
+
+    # Questions whose answer is *computed* from a stored fact plus the current
+    # date, not looked up. Kept separate from _handle_ask because the value was
+    # never written down - deriving it is the whole point.
+    _BIRTH_YEAR_Q = re.compile(
+        r"\b(?:which|what)\s+(?:year|date)\s+(?:was|am)\s+i\s+born"
+        r"|\bwhen\s+was\s+i\s+born"
+        r"|\byear\s+(?:of\s+my\s+)?birth\b"
+        r"|\bborn\s+in\s+which\s+year",
+        re.IGNORECASE,
+    )
+    # "if I am 16" / "I am 16" inside a question - an explicit value to use.
+    _INLINE_AGE = re.compile(r"\b(?:if\s+)?i(?:'m|\s+am)\s+(\d{1,3})\b", re.IGNORECASE)
+
+    def _handle_birth_year(self, text: str) -> Optional[Answer]:
+        """Compute a birth year from an age and the current date.
+
+        The age may be stated in the question ("if I am 16 ...") or already known
+        from something the user told Eddi. The result is a range, not a single
+        year, because an age does not fix a birthday: someone who is 16 today was
+        born in the current year minus 16, or minus 17 if their birthday has not
+        yet passed.
+        """
+        if not self._BIRTH_YEAR_Q.search(text):
+            return None
+
+        source = ""
+        inline = self._INLINE_AGE.search(text)
+        if inline:
+            age = int(inline.group(1))
+            source = f"the age of {age} in your question"
+        else:
+            stored = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, "age")]
+            digits = [o for o in stored if str(o).strip().isdigit()]
+            if not digits:
+                return Answer(
+                    "I don't know your age yet - tell me ('I am 16 years old') and ask again.",
+                    kind="unknown",
+                    details=["no fact stored for (user, age)"],
+                )
+            age = int(str(digits[0]).strip())
+            source = f"your age, {age}, which you told me"
+
+        if not 0 <= age <= 130:
+            return Answer(
+                f"{age} is not a plausible age, so I can't work out a birth year from it.",
+                kind="math_error",
+            )
+
+        this_year = datetime.date.today().year
+        latest = this_year - age          # birthday already passed this year
+        earliest = this_year - age - 1    # birthday still to come
+        return Answer(
+            f"You were born in {earliest} or {latest}.\n"
+            f"  working: {this_year} - {age} = {latest}. "
+            f"Because an age alone does not fix a birthday, someone who is {age} "
+            f"today could have been born in {earliest} (birthday not yet reached) "
+            f"or {latest} (birthday already passed).",
+            kind="derive",
+            confidence=1.0,
+            details=[
+                f"computed from {source} and today's date ({this_year})",
+                "no fact for a birth year was stored; this is derived, not remembered",
+            ],
+        )
+
     def _handle_ask(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:ask|query)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)
         if match:
@@ -278,6 +634,18 @@ class Reasoner:
                          text, re.IGNORECASE)
         if match:
             return self._answer_attribute(match.group(1), match.group(2))
+
+        # "what <relation> is <subject>" - the way people actually ask
+        # ("what colour is zorblax?"). The relation is whatever sits between
+        # 'what' and 'is', and it only routes when that word really is a
+        # written relation, so ordinary questions fall through untouched.
+        match = re.match(r"^what\s+(.+?)\s+(?:is|are|was)\s+(?:the\s+)?(.+?)[\?\.\!]*$",
+                         text, re.IGNORECASE)
+        if match:
+            relation = self.agent.resolve_relation(match.group(1))
+            subject = self.agent.resolve_entity(match.group(2))
+            if relation and subject and self.agent.kb.query(subject, relation):
+                return self._answer_relation(subject, relation, original=text)
 
         # "what does <subject> <verb>?"  /  "who does <subject> <verb>?"
         match = re.match(r"^(?:what|who)\s+(?:does|do|did)\s+(?:the\s+)?(.+?)\s+([\w \-]+?)[\?\.\!]*$",
@@ -325,7 +693,7 @@ class Reasoner:
         relation = self.agent.resolve_relation(relation_text)
         if subject is None:
             return Answer(
-                f"I don't know '{subject_text}' yet. Try 'teach {subject_text} <relation> <value>'.",
+                f"I don't know '{subject_text}' yet. Teach me a fact about it and ask again.",
                 kind="unknown",
             )
         if relation and self.agent.kb.query(subject, relation):
@@ -368,7 +736,7 @@ class Reasoner:
         hits = self.agent.kb.query(resolved_subject, resolved_relation, top_k=3)
         if not hits:
             return Answer(
-                f"I don't know that yet. Try 'teach {resolved_subject} {resolved_relation} <value>'.",
+                f"I don't know that yet. Teach me a {resolved_relation} for {resolved_subject} and ask again.",
                 kind="unknown",
             )
         objects = ", ".join(obj for obj, _ in hits)
@@ -407,6 +775,114 @@ class Reasoner:
         if subject is None:
             return Answer(f"I don't know anything about '{match.group(1)}' yet.", kind="unknown")
         return self._about(subject)
+
+    def _handle_phrase_lookup(self, text: str) -> Optional[Answer]:
+        """Answer 'what is the <relation> for <subject>' without mistaking a
+        preposition for the relation.
+
+        'what is the default port for HTTPS' matched the generic
+        'what is <relation> of/for <subject>' path, took 'for' as the relation
+        name, and replied "I know the relation 'form'". Words that exist only to
+        join a question are not relations.
+        """
+        match = re.match(
+            r"^what\s+is\s+(?:the\s+)?(.+?)\s+(?:for|of)\s+(?:the\s+)?(.+?)\s*\??$",
+            text.strip(), re.IGNORECASE,
+        )
+        if not match:
+            return None
+        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        subject = self.agent.resolve_entity(subject_text)
+        if subject is None:
+            return None
+        relation = self.agent.resolve_relation(relation_text)
+        if relation is None:
+            return None
+        # Only claim the question if this subject actually has that relation.
+        # Otherwise fall through, so 'what is the capital of France' still
+        # reaches the handler that sweeps every capital.
+        hits = self.agent.kb.query(subject, relation)
+        if not hits:
+            return None
+        return Answer(
+            f"{hits[0][0]}",
+            kind="ask",
+            confidence=1.0,
+            details=[f"memory: ({subject}, {relation}) -> {hits[0][0]}"],
+        )
+
+    def _handle_types_of(self, text: str) -> Optional[Answer]:
+        """Answer 'what orbits the Sun' - a class question, not an instance one.
+
+        'which planet does the Moon orbit' asks for one entity; 'what orbits the
+        Sun' asks for everything of that kind. The base had no way to sweep a
+        relation backwards across every subject.
+        """
+        match = re.match(
+            r"^what\s+(?:things\s+)?(.+?)\s+(?:the\s+)?(.+?)\s*\??$",
+            text.strip(), re.IGNORECASE,
+        )
+        if not match:
+            return None
+        relation_text, object_text = match.group(1).strip(), match.group(2).strip()
+        relation = self.agent.resolve_relation(relation_text)
+        target = self.agent.resolve_entity(object_text)
+        if relation is None or target is None:
+            return None
+        subjects = [
+            s for s, r, o, _h in self.agent.kb.facts
+            if r == relation and o == target
+        ]
+        if not subjects:
+            return None
+        subjects = list(dict.fromkeys(subjects))
+        listing = ", ".join(s.replace("_", " ") for s in subjects)
+        return Answer(
+            f"{listing}.",
+            kind="reverse",
+            confidence=1.0,
+            details=[f"all subjects with --{relation}--> {target}"],
+        )
+
+    # ------------------------------------------------------- reverse lookup
+    def _handle_reverse(self, text: str) -> Optional[Answer]:
+        """Answer 'what is Paris the capital of?' - the fact is stored backwards.
+
+        The base writes capital_of as (Paris, capital_of, France). Asking what
+        Paris *is the capital of* means walking the inverse direction, which no
+        subject->object handler could do.
+        """
+        match = re.match(
+            r"^(?:what|which)\s+(?:is|was)?\s*(.+?)\s+(?:the\s+)?(.+?)\s+of\s*\??$",
+            text, re.IGNORECASE,
+        )
+        if not match:
+            return None
+        subject_text, relation_text = match.group(1).strip(), match.group(2).strip()
+        subject = self.agent.resolve_entity(subject_text)
+        relation = self.agent.resolve_relation(relation_text)
+        if subject is None or relation is None:
+            return None
+
+        # "what is Paris the capital of?" -> Paris is the capital of France.
+        # The fact is stored (Paris, capital_of, France), so the answer is the
+        # OBJECT of a fact whose SUBJECT is Paris. Reading it the other way
+        # round finds nothing, which is what the first version did.
+        values = [
+            fact_object
+            for fact_subject, fact_relation, fact_object, _hv in self.agent.kb.facts
+            if fact_relation == relation and fact_subject == subject
+        ]
+        if not values:
+            return None
+        values = list(dict.fromkeys(values))
+        pretty = " and ".join(v.replace("_", " ") for v in values)
+        return Answer(
+            f"{pretty}.",
+            kind="reverse",
+            confidence=1.0,
+            details=[f"{subject} --{relation}--> {pretty}"],
+        )
 
     def _handle_relations(self, text: str) -> Optional[Answer]:
         match = re.match(
@@ -529,34 +1005,386 @@ class Reasoner:
             return None
         return Answer(f"{_format_number(value)}", kind="math", confidence=1.0, details=[f"evaluated `{expr}`"])
 
-    # ------------------------------------------------------------- fallbacks
-    def _handle_greeting(self, text: str) -> Optional[Answer]:
-        lowered = text.lower().strip("!.? ")
-        greetings = {"hi", "hello", "hey", "yo", "hallo", "servus", "moin"}
-        if lowered in greetings:
+    # ---------------------------------------------------- natural arithmetic
+    # Problems stated in words rather than symbols. The expression evaluator
+    # next door only accepts arithmetic characters, so these need translating
+    # first: "15% of 200" is not an expression, it is a sentence.
+    _PERCENT_Q = re.compile(
+        r"^(?:what\s+is\s+|calc(?:ulate)?\s+)?(-?\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\s+"
+        r"(-?\d+(?:\.\d+)?)\s*\??$",
+        re.IGNORECASE,
+    )
+    _POWER_Q = re.compile(
+        r"^(?:what\s+is\s+)?(-?\d+(?:\.\d+)?)\s*(?:to\s+the\s+power\s+of|"
+        r"\^|raised\s+to)\s*(-?\d+)\s*\??$",
+        re.IGNORECASE,
+    )
+    _SQRT_Q = re.compile(
+        r"^(?:what\s+is\s+)?(?:the\s+)?square\s+root\s+of\s+(-?\d+(?:\.\d+)?)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    # Length in millimetres, time in seconds. Two separate tables because they
+    # are not commensurable - converting metres to seconds is not a unit error
+    # to be silently "fixed", it is a question with no answer.
+    _LENGTH_MM = {
+        "millimeter": 1, "millimetre": 1, "mm": 1,
+        "centimeter": 10, "centimetre": 10, "cm": 10,
+        "meter": 1000, "metre": 1000, "m": 1000,
+        "kilometer": 1000000, "kilometre": 1000000, "km": 1000000,
+    }
+    _TIME_S = {
+        "second": 1, "sec": 1, "s": 1,
+        "minute": 60, "min": 60,
+        "hour": 3600, "hr": 3600, "h": 3600,
+        "day": 86400,
+        "week": 604800,
+        "year": 31536000,
+    }
+
+    @classmethod
+    def _unit_factor(cls, name: str):
+        """(factor, table_id) for a unit, tolerating plurals ('kilometers')."""
+        word = name.strip().lower().replace(" ", "")
+        for table_id, table in (("length", cls._LENGTH_MM), ("time", cls._TIME_S)):
+            if word in table:
+                return table[word], table_id
+            if word.endswith("s") and word[:-1] in table:
+                return table[word[:-1]], table_id
+        return None, None
+
+    def _handle_natural_math(self, text: str) -> Optional[Answer]:
+        """Worded arithmetic: percentages, powers, roots, unit conversion.
+
+        These all failed before because the evaluator only parses symbols, so
+        '15% of 200' and 'square root of 144' fell through to the knowledge
+        handlers and were answered as lookups for the number's name.
+        """
+        match = self._PERCENT_Q.match(text.strip())
+        if match:
+            pct, whole = float(match.group(1)), float(match.group(2))
             return Answer(
-                "Hi! I'm Eddi. I remember facts, reason over them, do math and write text. "
-                "Try: teach Earth has_moon Moon | what is the moon of earth | Earth is to Sun as Moon is to ?",
-                kind="greeting",
+                f"{_format_number(pct / 100.0 * whole)}",
+                kind="math",
+                confidence=1.0,
+                details=[f"{pct}% of {whole} = {pct}/100 * {whole}"],
             )
-        if lowered in {"help", "commands", "?"}:
+
+        match = self._POWER_Q.match(text.strip())
+        if match:
+            base, exp = float(match.group(1)), int(match.group(2))
+            if abs(exp) > 1000:
+                return Answer(
+                    "That exponent is too large to compute usefully.", kind="math_error"
+                )
+            try:
+                value = base ** exp
+            except OverflowError:
+                return Answer("That number is too large to represent.", kind="math_error")
+            return Answer(f"{_format_number(value)}", kind="math", confidence=1.0,
+                          details=[f"{base} ** {exp}"])
+
+        match = self._SQRT_Q.match(text.strip())
+        if match:
+            value = float(match.group(1))
+            if value < 0:
+                return Answer(
+                    "The square root of a negative number is not a real number.",
+                    kind="math_error",
+                )
+            root = value ** 0.5
+            return Answer(f"{_format_number(root)}", kind="math", confidence=1.0,
+                          details=[f"sqrt({value})"])
+
+        # "how many meters in 5 kilometers" / "5 km in meters"
+        match = re.match(
+            r"^(?:how\s+many\s+)?(\w+?)\s+(?:are\s+)?in\s+"
+            r"(?:a|an|one)\s+(\w+?)\s*\??$|"
+            r"^(?:how\s+many\s+)?(\w+?)\s+(?:are\s+)?in\s+"
+            r"(-?\d+(?:\.\d+)?)\s*(\w+?)\s*\??$|"
+            r"^(?:convert\s+)?(-?\d+(?:\.\d+)?)\s*(\w+?)\s+(?:to|in)\s+(\w+?)\s*\??$",
+            text.strip(), re.IGNORECASE,
+        )
+        if match:
+            if match.group(1) and match.group(2):
+                # "how many seconds in a day"
+                dest, amount, src = match.group(1), 1.0, match.group(2)
+            elif match.group(3):
+                dest, amount, src = match.group(3), float(match.group(4)), match.group(5)
+            else:
+                amount, src, dest = float(match.group(6)), match.group(7), match.group(8)
+            src_factor, src_kind = self._unit_factor(src)
+            dest_factor, dest_kind = self._unit_factor(dest)
+            if src_factor is None or dest_factor is None:
+                return None
+            if src_kind != dest_kind:
+                return Answer(
+                    f"I can't convert {src.lower()} to {dest.lower()} - "
+                    "those measure different things.",
+                    kind="convert_error",
+                )
+            result = amount * src_factor / dest_factor
             return Answer(
-                "Commands:\n"
-                "  teach <subject> | <relation> | <object>\n"
-                "  teach <subject> has <relation> <object>\n"
-                "  ask <subject> | <relation>\n"
-                "  what is the <relation> of <subject>\n"
-                "  tell me about <subject>\n"
-                "  how is <a> related to <b>\n"
-                "  chain <start> | <rel1> | <rel2>\n"
-                "  rule <rel1> => <rel2>      (writable inference, no training)\n"
-                "  alias <phrase> = <canonical>\n"
-                "  <a> is to <b> as <c> is to ?\n"
-                "  2 + 2 * 10\n"
-                "  anything else -> language-model continuation",
-                kind="help",
+                f"{_format_number(result)} {dest.lower()}",
+                kind="convert",
+                confidence=1.0,
+                details=[f"{amount} {src.lower()} converted to {dest.lower()}"],
             )
         return None
+
+    _FALSE_PREMISE_Q = re.compile(
+        r"^why\s+(?:is|are|was|were)\s+(?:the\s+)?(.+?)\s+(?:a|an|the)\s+(.+?)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    def _handle_false_premise(self, text: str) -> Optional[Answer]:
+        """Catch a question built on something the base contradicts.
+
+        'Why is the Sun a planet?' presumes the Sun is a planet. Answering with
+        the Sun's facts silently accepts the premise; the honest reply names it.
+        Only fires when both entities are known and the claim conflicts with a
+        written 'type'.
+        """
+        match = self._FALSE_PREMISE_Q.match(text.strip())
+        if not match:
+            return None
+        subject_text, claim_text = match.group(1).strip(), match.group(2).strip()
+        subject = self.agent.resolve_entity(subject_text)
+        claim = self.agent.resolve_entity(claim_text)
+        if subject is None:
+            return None
+        actual = None
+        for relation, obj, _conf in self.agent.kb.facts_about(subject):
+            if relation == "type":
+                actual = obj
+        if actual is None:
+            return None
+        if claim is not None and (claim == actual or claim in actual):
+            # The premise is true; let the normal handlers answer it.
+            return None
+        return Answer(
+            f"I can't answer that as asked, because {subject_text} is not "
+            f"a {claim_text} - I have its type as {actual.replace('_', ' ')}.",
+            kind="false_premise",
+            confidence=1.0,
+            details=[f"contradicts stored ({subject}, type, {actual})"],
+        )
+
+    # ------------------------------------------------------- comparison & count
+    _COMPARE_Q = re.compile(
+        r"^(?:which|what)\s+is\s+(faster|slower|bigger|smaller|larger|older|younger|"
+        r"higher|lower|heavier|lighter)\s*,?\s*(.+?)\s+or\s+(?:a\s+|an\s+|the\s+)?(.+?)\s*\??$",
+        re.IGNORECASE,
+    )
+    _SPEED_RANK = {"fastest_memory": 4, "slower_than_cache": 3,
+                   "slower_than_RAM": 2, "slowest": 1}
+    _RANK_ATTRS = {
+        "faster": ("speed_rank", True), "slower": ("speed_rank", False),
+        "higher": ("speed_rank", True), "lower": ("speed_rank", False),
+    }
+    # Base forms for the "I have no data" message. String surgery on the
+    # comparative produced "bigg", which is exactly the kind of sloppy output
+    # that makes a system look careless even when the logic is right.
+    _ADJ_BASE = {
+        "faster": "speed", "slower": "speed",
+        "bigger": "size", "smaller": "size", "larger": "size",
+        "older": "age", "younger": "age",
+        "higher": "height", "lower": "height",
+        "heavier": "weight", "lighter": "weight",
+    }
+
+    def _handle_compare(self, text: str) -> Optional[Answer]:
+        """'which is faster, RAM or a register?' - compare written properties.
+
+        Both sides must carry a comparable attribute; otherwise the question is
+        answered about whichever entity happened to resolve.
+        """
+        match = self._COMPARE_Q.match(text.strip())
+        if not match:
+            return None
+        adjective = match.group(1).lower()
+        left_text, right_text = match.group(2).strip(), match.group(3).strip()
+
+        attribute, want_high = self._RANK_ATTRS.get(adjective, ("speed_rank", True))
+        scored = []
+        for label in (left_text, right_text):
+            entity = self.agent.resolve_entity(label)
+            if entity is None:
+                return None
+            value = None
+            for rel, obj, _conf in self.agent.kb.facts_about(entity):
+                if rel == attribute:
+                    value = obj
+                    break
+            if value is None:
+                return Answer(
+                    f"I don't know the {self._ADJ_BASE.get(adjective, 'value')} of "
+                    f"{label}, so I can't say which is {adjective}.",
+                    kind="unknown",
+                    details=[f"missing ({entity}, {attribute})"],
+                )
+            scored.append((label, entity, self._SPEED_RANK.get(value, 0), value))
+
+        (l_label, l_entity, l_rank, l_value), (r_label, r_entity, r_rank, r_value) = scored
+        if l_rank == r_rank:
+            winner = None
+        else:
+            left_wins = (l_rank > r_rank) == want_high
+            winner = (l_label, l_entity, l_rank, l_value) if left_wins else (r_label, r_entity, r_rank, r_value)
+        if winner is None:
+            return Answer(
+                f"They rank the same on {attribute}, so neither is {adjective}.",
+                kind="compare",
+                confidence=1.0,
+            )
+        return Answer(
+            f"{winner[0].capitalize()} is {adjective}.\n"
+            f"  {l_label}: {attribute} = {l_value}\n"
+            f"  {r_label}: {attribute} = {r_value}",
+            kind="compare",
+            confidence=1.0,
+            details=[f"compared written {attribute} values"],
+        )
+
+    _COUNT_Q = re.compile(
+        r"^how\s+many\s+(.+?)\s+do\s+you\s+know\s+about\s+(?:the\s+)?(.+?)\s*\??$|"
+        r"^how\s+many\s+facts\s+do\s+you\s+know\s*\??$",
+        re.IGNORECASE,
+    )
+
+    def _handle_count(self, text: str) -> Optional[Answer]:
+        """Count what is actually stored, rather than guessing."""
+        match = self._COUNT_Q.match(text.strip())
+        if not match:
+            return None
+        if match.group(2) is None:
+            return Answer(
+                f"I have {len(self.agent.kb)} facts written.",
+                kind="count",
+                confidence=1.0,
+                details=["counted len(kb)"],
+            )
+        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        subject = self.agent.resolve_entity(subject_text)
+        if subject is None:
+            return Answer(
+                f"I don't know anything about '{subject_text}'.",
+                kind="unknown",
+            )
+        relation = self.agent.resolve_relation(relation_text)
+        all_facts = self.agent.kb.facts_about(subject)
+        named = [o for r, o, _c in all_facts if relation and r == relation]
+        if relation:
+            return Answer(
+                f"{len(named)}: " + (", ".join(o.replace("_", " ") for o in named) or "none"),
+                kind="count",
+                confidence=1.0,
+                details=[f"counted ({subject}, {relation}) objects"],
+            )
+        return Answer(
+            f"{len(all_facts)} facts about {subject.replace('_', ' ')}.",
+            kind="count",
+            confidence=1.0,
+            details=[f"counted facts_about({subject})"],
+        )
+
+    # ------------------------------------------------------------- fallbacks
+    # Words that carry no question on their own. Used to decide whether a
+    # message is *only* a pleasantry, so "hi, what is python?" still routes to
+    # the knowledge handlers while "hi how are you?" gets a greeting.
+    _CHITCHAT_WORDS = frozenset(
+        """
+        hi hello hey yo hallo servus moin hola ciao greetings howdy
+        good morning afternoon evening night day
+        how are is it you you're your doing going there thanks thank
+        appreciate cheers bye goodbye cya later see soon ok okay
+        eddi please and so too very much really
+        """.split()
+    )
+
+    _GREETING_OPENERS = re.compile(
+        r"^\s*(?:hi|hello|hey|yo|hallo|servus|moin|hola|ciao|howdy|greetings"
+        r"|good\s+(?:morning|afternoon|evening|day))\b",
+        re.IGNORECASE,
+    )
+    _THANKS = re.compile(r"^\s*(?:thanks|thank\s+you|cheers|ta)\b", re.IGNORECASE)
+    _FAREWELL = re.compile(
+        r"^\s*(?:bye|goodbye|good\s+bye|see\s+(?:you|ya)|cya|later|good\s+night)\b",
+        re.IGNORECASE,
+    )
+    _HOW_ARE_YOU = re.compile(
+        r"\b(?:how\s+are\s+(?:you|u)|how'?s\s+it\s+going|how\s+you\s+doing"
+        r"|how\s+do\s+you\s+(?:do|feel)|are\s+you\s+(?:ok|okay|well|alright))\b",
+        re.IGNORECASE,
+    )
+
+    def _is_small_talk(self, text: str) -> bool:
+        """True when nothing in the message could be a question about knowledge.
+
+        A message is small talk if it opens with a greeting/thanks/farewell and
+        every remaining word is itself chit-chat. That keeps "hi" and
+        "hi how are you?" together while letting "hi, what is python?" through
+        to the knowledge handlers, where the real question lives.
+        """
+        words = [w for w in re.findall(r"[a-z']+", text.lower())]
+        if not words:
+            return False
+        # "how are you?" has no greeting word, so the opener test alone misses it.
+        if not (
+            self._GREETING_OPENERS.search(text)
+            or self._THANKS.search(text)
+            or self._FAREWELL.search(text)
+            or self._HOW_ARE_YOU.search(text)
+        ):
+            return False
+        return all(w in self._CHITCHAT_WORDS for w in words)
+
+    def _handle_greeting(self, text: str) -> Optional[Answer]:
+        # 'help' is a request for the command list, not a pleasantry. It must be
+        # routed before the small-talk gate, which would otherwise reject it.
+        bare = text.strip()
+        # a lone '?' strips to '' , so test the raw form as well
+        if bare == "?" or bare.lower().strip("!. ") in {"help", "commands", "what can you do"}:
+            return Answer(
+                "I'm Eddi. Things I can actually do:\n"
+                "  tell me about <subject>        facts I hold about it\n"
+                "  what is the <relation> of <subject>\n"
+                "  what <relation> is <subject>   (also: which ..., who ...)\n"
+                "  how old am I / which year was I born\n"
+                "  I am 16 years old              (tell me about yourself)\n"
+                "  teach <subject> | <relation> | <object>\n"
+                "  rule <rel1> => <rel2>          writable inference\n"
+                "  alias <phrase> = <canonical>\n"
+                "  chain <start> | <rel1> | <rel2>\n"
+                "  Earth is to Sun as Moon is to ?\n"
+                "  what is 2 + 2 * 10\n"
+                "  how many <relation> do you know about <subject>",
+                kind="help",
+            )
+        if not self._is_small_talk(text):
+            return None
+
+        if self._THANKS.search(text):
+            return Answer(
+                "Any time. Ask me something else whenever you like.",
+                kind="greeting",
+            )
+        if self._FAREWELL.search(text):
+            return Answer(
+                "See you. I keep what you taught me between sessions.",
+                kind="greeting",
+            )
+        if self._HOW_ARE_YOU.search(text):
+            return Answer(
+                "I'm doing well, thanks for asking - I'm a small program, so my mood "
+                "is mostly intact memory. What can I help with?",
+                kind="greeting",
+            )
+        return Answer(
+            "Hi! I'm Eddi. I remember facts, reason over them, do math and write text. "
+            "Try: teach Earth has_moon Moon | what is the moon of earth | Earth is to Sun as Moon is to ?",
+            kind="greeting",
+        )
 
     def _handle_generate(self, text: str) -> Answer:
         if self.agent.lm.trained_tokens == 0:
@@ -565,7 +1393,88 @@ class Reasoner:
                 "or run `python -m eddi.cli --train` to build the built-in curriculum.",
                 kind="unknown",
             )
+        # An n-gram model will always continue *something*, so a fluent answer is
+        # not evidence of knowledge. If the question is about a word the model has
+        # never seen, the continuation cannot be about it - refusing is correct,
+        # and returning a confident-looking sentence would be a lie.
+        #
+        # Never refuse something the knowledge base can actually answer: facts
+        # written with `teach` are not in the language model's vocabulary, and a
+        # guard placed before this check would deny knowledge Eddi really has.
+        if self._kb_can_answer(text):
+            return self._answer_from_kb(text)
+        unknown = self._unknown_key_terms(text)
+        if unknown:
+            return Answer(
+                f"I don't know anything about '{unknown[0]}' yet.",
+                kind="unknown",
+                details=[f"not in vocabulary: {', '.join(unknown)}"],
+            )
         generated = self.agent.generate(text, max_tokens=28)
         if not generated:
             return Answer("I have nothing to build on yet.", kind="unknown")
-        return Answer(generated, kind="generate", confidence=0.5, details=["interpolated n-gram model"])
+        # An n-gram model primes on its own prompt, so the cheapest continuation
+        # is to repeat the question. That is not an answer, so strip it.
+        body = generated.strip()
+        prompt = text.strip()
+        if body.lower().startswith(prompt.lower()):
+            body = body[len(prompt):].lstrip(" .,:;-").strip()
+        if len(body.split()) < 3:
+            return Answer(
+                f"I don't have anything specific about '{text.strip()}' - "
+                "my language model has too little text to build a real answer.",
+                kind="unknown",
+            )
+        return Answer(
+            body,
+            kind="generate",
+            confidence=0.5,
+            details=["interpolated n-gram model"],
+        )
+
+    def _kb_can_answer(self, text: str) -> bool:
+        """Is there a written fact that plausibly answers this question?"""
+        subject = self.agent.resolve_entity(text)
+        if subject and self.agent.kb.facts_about(subject):
+            return True
+        for word in _WORD_RE.findall(text):
+            resolved = self.agent.resolve_entity(word)
+            if resolved and self.agent.kb.facts_about(resolved):
+                return True
+        return False
+
+    def _answer_from_kb(self, text: str) -> Answer:
+        """Answer from written facts after the phrase parsers declined."""
+        subject = self.agent.resolve_entity(text)
+        if subject and self.agent.kb.facts_about(subject):
+            return self._about(subject)
+        for word in _WORD_RE.findall(text):
+            resolved = self.agent.resolve_entity(word)
+            if resolved and self.agent.kb.facts_about(resolved):
+                return self._about(resolved)
+        return Answer(f"I don't know anything about '{text.strip()}' yet.", kind="unknown")
+
+    _STOP_TERMS = frozenset(
+        """
+        what is are was were the a an of for to in on at about tell me you your
+        i we they it this that these those do does did can could should would
+        please and or but how why when where which who whom whose with from by
+        know more please explain describe give show make made making get got
+        use used using need want like way thing things something anything
+        """.split()
+    )
+
+    def _unknown_key_terms(self, text: str) -> List[str]:
+        """Content words the language model has never seen, longest first."""
+        vocab = getattr(self.agent.lm, "vocab", None)
+        if not vocab:
+            return []
+        known = {str(w).lower() for w in vocab}
+        out: List[str] = []
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_'-]*", text):
+            word = raw.lower().strip("'-")
+            if len(word) < 3 or word in self._STOP_TERMS or word in known:
+                continue
+            out.append(raw)
+        out.sort(key=len, reverse=True)
+        return out

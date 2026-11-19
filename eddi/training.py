@@ -26,7 +26,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from . import curriculum, evaluation
 from .agent import EddiAgent
-from .paths import default_brain_path
+from .paths import default_brain_path, default_memory_path
 
 BRAIN_FORMAT = "eddi-brain-v2"
 
@@ -247,7 +247,12 @@ def load_brain(
     if payload["format"] != BRAIN_FORMAT:
         raise ValueError(f"Unsupported brain format {payload['format']!r} (expected {BRAIN_FORMAT})")
 
-    agent = agent or EddiAgent(context_path=context_path, persist_context=persist_context)
+    agent = agent or EddiAgent(
+        context_path=context_path,
+        persist_context=persist_context,
+        brain_path=path,
+        memory_path=default_memory_path(),
+    )
     direct = [f for f in payload.get("facts", []) if tuple(f) not in set(
         tuple(d) for d in payload.get("derived", [])
     )]

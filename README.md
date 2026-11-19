@@ -1,6 +1,6 @@
 # Eddi
 
-**A writable hyperdimensional memory + a trained language model + a 1M-token disk-backed context — running on consumer hardware, no GPU and no VRAM bottleneck.**
+**A writable hyperdimensional memory + verbatim text memory + a trained language model — running on consumer hardware, no GPU and no VRAM bottleneck.**
 
 Eddi is not a transformer and does not pretend to be one. It is a compact, local agent
 that *remembers what you teach it*, *reasons over those memories*, *does math*, and
@@ -60,7 +60,7 @@ Learning lives in **two stores**, both on disk and both inspectable:
 | Store | Contains | Where | Survives restart |
 |---|---|---|---|
 | **Brain file** | facts, rules, aliases, derived facts, the language model | `~/.local/share/eddi/eddi_brain.pkl` (override with `EDDI_BRAIN`) | yes |
-| **Context stream** | the last 1,000,000 tokens, mmap ring + LSH buckets | OS temp dir (`eddi_agent_context.mmap`) | yes - reused, not re-created |
+| **Verbatim memory** | what you told it, as real text, chunked and searchable | `~/.local/share/eddi/eddi_memory.jsonl` (override with `EDDI_MEMORY`) | yes |
 
 The brain is deliberately **not** in the temp directory: it is learned state, and temp
 directories get cleaned by the OS. `eddi --status` shows both paths and whether the brain
@@ -71,8 +71,8 @@ Nothing is silently thrown away:
 * `agent.close()` saves the brain when `autosave=True` (or a `brain_path` is set);
 * `eddi --chat` always saves on exit unless you pass `--no-save`;
 * `eddi --ask` prints a warning when a question wrote something and `--save` was not given;
-* closing an agent **no longer deletes** the 1M-token context file, and reopening it
-  restores the record count so you continue instead of starting from zero.
+* closing an agent **no longer deletes** the memory file, and reopening it restores every
+  chunk so you continue instead of starting from zero.
 
 ## Two ways to make Eddi smarter
 
@@ -173,7 +173,7 @@ carries a viewport meta and stylesheet, and escapes user text (so a title of
 | **Trained language model** | Interpolated back-off n-gram model (default: 2-token context, `--order 3`) with **absolute discounting**: interpolation weights depend on evidence, so sparse long contexts cannot overrule solid short ones. Deeper contexts (`--order 4/5`) pay off on larger corpora. | `eddi/language.py` |
 | **Generalisation beyond n-grams** | A second learning channel over **word-type classes** (cheap stemming: `runs/running/ran → run`, numbers → `<num>`) lets unseen token contexts still be answered. | `eddi/language.py` |
 | **Reasoning router** | Questions are parsed and routed: teach, rule, alias, ask, attribute, about, relate, chain (multi-hop), analogy, math, generate — with honest "I don't know". | `eddi/reasoning.py` |
-| **1M-token context** | L1 sliding window in RAM + L2 `mmap` ring buffer with 16-bit LSH buckets; ~9.2M tokens/sec ingestion in the C++ core. | `eddi/context.py`, `src/eddi_core.cpp` |
+| **Verbatim memory** | Real text, split into ~180-token chunks and appended to a JSONL file. Answers are retrieved with BM25 plus boosts for exact identifiers and phrases, then accepted only if the chunk covers most of the question's terms - so it quotes what you said instead of guessing. | `eddi/memory.py` |
 | **Measurable training** | Held-out perplexity, in-vocabulary perplexity, bigram baseline, n-gram coherence, fact accuracy and reasoning accuracy after every training run. | `eddi/evaluation.py`, `eddi/training.py` |
 | **Portable brain** | Facts + model + counts serialise to one `.pkl` (`eddi-brain-v2`), loadable on any platform. | `eddi/training.py` |
 
@@ -248,8 +248,8 @@ Eddi is a from-scratch learner, so quality scales with the corpus you give it:
   arXiv metadata snapshot (`eddi/arxiv_ingest.py`);
 * raise `--order` to 4 or 5 once the corpus is large (roughly: >1M tokens per context step);
 * each extra epoch reinforces transitions the model already saw;
-* `--max-tokens` sets a hard budget (default 2M) and the context store keeps streaming
-  to disk beyond RAM;
+* verbatim memory grows without a fixed budget: chunks are appended to disk and only the
+  index lives in RAM;
 * `--prune N` drops n-grams seen fewer than N times to keep saved brains small.
 
 Eddi does **not** download anything on its own and never calls a cloud API.
@@ -265,12 +265,64 @@ eddi --train [--pack P]... [--corpus DIR]... [--epochs N] [--order N] [--prune N
 eddi --bench [--json]       held-out benchmark with miss explanations
 eddi --ask "..." [--explain] [--save]
 eddi --chat [--save-on-exit]
+eddi --ui [--host H] [--port 8000]      browser chat UI (talk to Eddi in a tab)
 eddi --serve [--host H] [--port 8765]   JSON API: GET /health /stats, POST /ask
 eddi-gui                    Tkinter desktop app (train, chat, ingest, save)
 ```
 
 `--brain PATH` points at a different brain file (default: `eddi_brain.pkl` in the OS temp dir;
 use `--brain ./eddi_brain.pkl` to keep it next to your project).
+
+### Capability suite
+
+`python -m eddi.eval_questions` runs **104 questions across 70 distinct
+abilities** — lookup, reverse lookup, comparison, counting, analogy, chaining,
+arithmetic, percentages, powers, roots, unit conversion, user memory,
+derivation, robustness (case/typos/punctuation), honesty, small talk, self
+knowledge and teaching.
+
+Every question names the ability it exercises, so a failure points at a
+mechanism rather than just "wrong answer". Exit code is 1 if anything fails, so
+it can gate CI. `--verbose` shows every answer; `--json` emits rows.
+
+The suite is mutation-checked: deliberately breaking the inverse-fact
+direction (104 -> 101) or removing the out-of-vocabulary guard (104 -> 102)
+both make it fail, so it is not passing by accident.
+
+### Browser UI
+
+```bash
+python -m eddi.cli --ui              # or: python -m eddi.webserver --port 8000
+```
+
+Opens a chat page on `http://localhost:8000` (bind `0.0.0.0` so a preview pane or
+another device can reach it). No build step, no framework, no CDN — one page
+served from `eddi/webserver.py`, styled with the same design tokens as the
+generated pages.
+
+What it does:
+
+| | |
+|---|---|
+| **Chat** | Type or click a suggestion; each answer is tagged with the capability that produced it (`about`, `math`, `ask`, `generate`) and its confidence. |
+| **Honest refusals** | If Eddi does not know something it says so and offers a form to teach it, instead of continuing the language model into a confident-sounding sentence. |
+| **Teach inline** | When Eddi says it does not know a subject, an inline form writes the fact — and it is saved to the brain immediately, so it survives a restart. |
+| **Live status** | Header shows fact count, trained tokens and liveness. |
+
+Endpoints (also usable on their own):
+
+```
+GET  /          the chat page
+GET  /health    {"status":"ok","version":...}
+GET  /stats     fact count, vocab, trained tokens
+POST /ask       {"text":"..."} -> {"text","kind","confidence"}
+POST /teach     {"subject","relation","object"}   writes one fact
+POST /ingest    {"text":"..."}                    learns from a paragraph
+```
+
+The server is stateless with respect to conversation: the transcript lives in the
+page, so two tabs cannot corrupt each other. Requests are serialised through a
+lock because the agent itself is not thread-safe.
 
 ### HTTP API
 
@@ -304,7 +356,7 @@ agent falls back to `mmap` automatically when it is absent.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v     # 28 tests, cross-platform
+python -m unittest discover -s tests -v     # 70 tests, cross-platform
 ```
 
 The suite covers hypervector algebra (bind/unbind, bundles, permutation), fuzzy knowledge
@@ -325,7 +377,7 @@ assets in a matrix (so the platform jobs never race on the same release) plus `s
                     ┌──────────────────────────── eddi/ ────────────────────────────┐
   you ──► eddi.cli  │ reasoner ──► hdc.WritableKnowledgeBase   (facts, analogy, chain) │
         eddi-gui    │        └──► language.NGramLanguageModel  (trained text model)     │
-        /ask API    │        └──► context.TieredContext1M      (L1 RAM + L2 mmap + LSH)  │
+        /ask API    │        └──► memory.ChunkMemory           (verbatim text, BM25)    │
                     │ training ──► curriculum / your corpus / evaluation ──► brain.pkl  │
                     └───────────────────────────────────────────────────────────────┘
                                    optional accelerator: src/eddi_core.cpp
@@ -343,9 +395,11 @@ assets in a matrix (so the platform jobs never race on the same release) plus `s
   distribution, but it does not follow complex instructions or understand long documents.
 * Fact accuracy is measured on the built-in curriculum's held-out questions; questions far
   outside that vocabulary return `unknown` rather than a guess.
-* The 1M-token context is a retrieval store and recorder, not attention: it streams, buckets
-  and recalls tokens, while reasoning over long documents happens through the n-gram model
-  and the knowledge base.
+* Verbatim memory retrieves; it does not reason. A recalled sentence is quoted as-is, and
+  the model is not asked to combine several recalled passages into a new answer.
+* `context.TieredContext1M` is still in the tree but is *not* memory: it records token
+  hashes in a ring buffer, stores no text, and nothing in the answer path reads it back.
+  It is legacy and scheduled for removal.
 
 ## License
 
