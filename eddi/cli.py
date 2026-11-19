@@ -43,8 +43,13 @@ def _load_agent(brain: Optional[str], quiet: bool = False) -> EddiAgent:
 
 def cmd_status(args: argparse.Namespace) -> int:
     path = args.brain or default_brain_path()
+    from .paths import default_context_path
+
     print(f"Eddi v{__version__}")
     print(f"Brain file : {path} ({'found' if os.path.exists(path) else 'missing'})")
+    print("             facts, rules, aliases and the language model live here")
+    print(f"Context    : {default_context_path('agent_context')}")
+    print("             1M-token mmap stream, kept on disk between sessions")
     core = find_core_binary()
     print(f"C++ core   : {core if core else 'not built (optional, python fallback is used)'}")
     if os.path.exists(path):
@@ -147,8 +152,10 @@ def cmd_ask(args: argparse.Namespace) -> int:
                 print(f"  · {detail}")
         if args.save:
             save_brain(agent, args.brain)
+        elif agent._dirty:
+            print("  (nothing saved - re-run with --save to keep this)")
     finally:
-        agent.close()
+        agent.close(save=False)
     return 0
 
 
@@ -184,10 +191,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
             answer = agent.answer(line)
             print(f"eddi [{answer.kind}]> {answer.text}")
     finally:
-        if args.save_on_exit:
-            save_brain(agent, args.brain)
-            print(f"Brain saved to {args.brain or default_brain_path()}")
-        agent.close()
+        if not args.no_save:
+            saved = save_brain(agent, args.brain)
+            print(f"Brain saved to {saved}")
+        agent.close(save=False)
     return 0
 
 
@@ -278,7 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-eval", action="store_true", help="skip the held-out benchmark during training")
     parser.add_argument("--json", action="store_true", help="print benchmark as JSON")
     parser.add_argument("--explain", action="store_true", help="show where the answer came from")
-    parser.add_argument("--save-on-exit", action="store_true", help="save the brain when chat exits")
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="do not save the brain when chat exits (default: always save, so learning is never lost)",
+    )
     parser.add_argument(
         "--save",
         action="store_true",

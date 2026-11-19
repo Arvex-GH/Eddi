@@ -38,6 +38,8 @@ class EddiAgent:
         max_tokens: int = 1_000_000,
         persist_context: bool = True,
         lm_order: int = 3,
+        brain_path: Optional[str] = None,
+        autosave: bool = False,
     ):
         self.kb = WritableKnowledgeBase()
         self.lm = NGramLanguageModel(order=lm_order)
@@ -47,6 +49,9 @@ class EddiAgent:
         self._context_path = context_path or default_context_path("agent_context")
         self._max_tokens = max_tokens
         self._reasoner = None
+        self._brain_path = brain_path
+        self._autosave = autosave
+        self._dirty = False
 
     # ---------------------------------------------------------------- context
     @property
@@ -78,6 +83,7 @@ class EddiAgent:
         for i in range(1, len(tokens)):
             self.transitions.setdefault((tokens[i - 1],), Counter())[tokens[i]] += 1
         self.lm.train_text(text)
+        self._dirty = True
         return len(tokens)
 
     def teach(self, subject: str, relation: str, obj: str) -> int:
@@ -87,6 +93,7 @@ class EddiAgent:
         facts derived by rules).
         """
         self.kb.write_fact(subject, relation, obj)
+        self._dirty = True
         return 1 + self.kb.apply_rules()
 
     write_fact = teach
@@ -98,11 +105,15 @@ class EddiAgent:
 
     def teach_rule(self, premise: str, conclusion: str) -> Tuple[str, str]:
         """Write an inference rule (no training): ``X --premise--> Y`` implies ``X --conclusion--> Y``."""
-        return self.kb.add_rule(premise, conclusion)
+        rule = self.kb.add_rule(premise, conclusion)
+        self._dirty = True
+        return rule
 
     def teach_alias(self, alias: str, canonical: str) -> str:
         """Write a synonym so Eddi understands a phrase it was never trained on."""
-        return self.kb.add_alias(alias, canonical)
+        resolved = self.kb.add_alias(alias, canonical)
+        self._dirty = True
+        return resolved
 
     def ingest_file(self, path: str) -> int:
         from .pipeline import ingest_file
@@ -227,18 +238,34 @@ class EddiAgent:
         }
 
     # --------------------------------------------------------------- lifecycle
-    def close(self) -> None:
+    def save(self, path: Optional[str] = None) -> str:
+        """Persist everything learned so far (facts, rules, aliases, language)."""
+        from .training import save_brain
+
+        written = save_brain(self, path or self._brain_path)
+        self._dirty = False
+        return written
+
+    def close(self, save: Optional[bool] = None) -> None:
+        """Close the context store.
+
+        Learned state is **not** thrown away silently: if this agent wrote
+        anything and a ``brain_path`` is configured, it is saved on close
+        unless ``save=False`` is passed explicitly.
+        """
+        should_save = self._autosave if save is None else save
+        if should_save and self._dirty and self._brain_path:
+            try:
+                self.save(self._brain_path)
+            except Exception:  # never mask the original failure during shutdown
+                pass
         if self._ctx is not None:
             self._ctx.close()
             self._ctx = None
         if self._persist_context and self._context_path:
-            try:
-                import os
-
-                if os.path.exists(self._context_path):
-                    os.remove(self._context_path)
-            except OSError:
-                pass
+            # Deleting the mmap would silently discard the 1M-token context.
+            # It is kept on disk so the next session can reuse it.
+            pass
 
     def __enter__(self) -> "EddiAgent":
         return self

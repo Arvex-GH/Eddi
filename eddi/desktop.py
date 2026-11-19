@@ -113,8 +113,9 @@ class EddiDesktopApp:
     def on_close(self) -> None:
         try:
             save_brain(self.agent, self.brain_path)
+            self._write(f"Brain saved to {self.brain_path}")
         finally:
-            self.agent.close()
+            self.agent.close(save=False)
             self.root.destroy()
 
 

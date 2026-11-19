@@ -404,6 +404,76 @@ class TestTraining(unittest.TestCase):
                 load_brain(bad)
 
 
+class TestMemoryIsActuallyPersistent(unittest.TestCase):
+    """Everything learned must land somewhere durable - not in a temp file."""
+
+    def test_default_brain_lives_in_user_data_dir(self):
+        from eddi.paths import default_brain_path, temp_dir
+
+        path = default_brain_path()
+        self.assertNotEqual(Path(path).parent, Path(temp_dir()))
+
+    def test_everything_learned_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = os.path.join(tmp, "all.pkl")
+            a = EddiAgent(persist_context=False)
+            a.teach("kestrel", "is_a", "bird")
+            a.teach_rule("is_a", "warm_blooded")
+            a.teach_alias("the little hawk", "kestrel")
+            a.ingest_text("The kestrel hovers over the field.")
+            before = {
+                "facts": len(a.kb),
+                "derived": len(a.kb.derived),
+                "rules": list(a.kb.rules),
+                "aliases": len(a.kb.user_aliases),
+                "tokens": a.lm.trained_tokens,
+            }
+            a.save(brain)
+            a.close(save=False)
+
+            b = load_brain(brain, persist_context=False)
+            try:
+                self.assertEqual(b.kb.rules, before["rules"])
+                self.assertEqual(len(b.kb.user_aliases), before["aliases"])
+                self.assertEqual(b.lm.trained_tokens, before["tokens"])
+                self.assertEqual(len(b.kb.derived), before["derived"])
+                self.assertIn("bird", b.answer("what is the warm_blooded of the little hawk").text)
+            finally:
+                b.close(save=False)
+
+    def test_close_survives_when_autosave_is_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = os.path.join(tmp, "auto.pkl")
+            a = EddiAgent(persist_context=False, brain_path=brain, autosave=True)
+            a.teach("otter", "is_a", "mammal")
+            a.close()
+            self.assertTrue(Path(brain).exists())
+            b = load_brain(brain, persist_context=False)
+            try:
+                self.assertEqual(len(b.kb), 1)
+            finally:
+                b.close(save=False)
+
+    def test_context_survives_close_and_reopen(self):
+        from eddi.context import TieredContext1M
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ctx.mmap")
+            store = TieredContext1M(path, max_tokens=128)
+            for i in range(7):
+                store.append(i, i * 3)
+            store.close()
+            self.assertTrue(Path(path).exists(), "context file must not be deleted on close")
+
+            reopened = TieredContext1M(path, max_tokens=128)
+            try:
+                self.assertEqual(reopened.count, 7)
+                reopened.append(99, 9)
+                self.assertEqual(reopened.count, 8)
+            finally:
+                reopened.close()
+
+
 class TestCrossPlatform(unittest.TestCase):
     def test_paths_are_cross_platform(self):
         path = default_context_path("unit_test")

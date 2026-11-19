@@ -53,6 +53,27 @@ the C++ core is an optional accelerator.
 
 ---
 
+## Where everything Eddi learns is stored
+
+Learning lives in **two stores**, both on disk and both inspectable:
+
+| Store | Contains | Where | Survives restart |
+|---|---|---|---|
+| **Brain file** | facts, rules, aliases, derived facts, the language model | `~/.local/share/eddi/eddi_brain.pkl` (override with `EDDI_BRAIN`) | yes |
+| **Context stream** | the last 1,000,000 tokens, mmap ring + LSH buckets | OS temp dir (`eddi_agent_context.mmap`) | yes - reused, not re-created |
+
+The brain is deliberately **not** in the temp directory: it is learned state, and temp
+directories get cleaned by the OS. `eddi --status` shows both paths and whether the brain
+exists.
+
+Nothing is silently thrown away:
+
+* `agent.close()` saves the brain when `autosave=True` (or a `brain_path` is set);
+* `eddi --chat` always saves on exit unless you pass `--no-save`;
+* `eddi --ask` prints a warning when a question wrote something and `--save` was not given;
+* closing an agent **no longer deletes** the 1M-token context file, and reopening it
+  restores the record count so you continue instead of starting from zero.
+
 ## Two ways to make Eddi smarter
 
 The original goal is preserved exactly: **you can write intelligence into Eddi without training anything.**

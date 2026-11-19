@@ -29,8 +29,20 @@ def default_context_path(name: str = "context") -> str:
 
 
 def default_brain_path() -> str:
-    """Default location of a saved brain (facts + language model)."""
-    return str(temp_dir() / "eddi_brain.pkl")
+    """Default location of a saved brain (facts + language model).
+
+    A brain is *learned state*, so it lives in the per-user data directory, not
+    in the OS temp directory (which cleaners and reboots wipe).  Set
+    ``EDDI_BRAIN`` to override, and existing ``%TEMP%/eddi_brain.pkl`` files
+    are still honoured for backwards compatibility.
+    """
+    override = os.environ.get("EDDI_BRAIN")
+    if override:
+        return str(Path(override).expanduser())
+    legacy = temp_dir() / "eddi_brain.pkl"
+    if legacy.exists():
+        return str(legacy)
+    return str(user_data_dir() / "eddi_brain.pkl")
 
 
 def user_data_dir() -> Path:

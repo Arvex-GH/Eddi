@@ -30,7 +30,7 @@ class TieredContext1M:
         path: Optional[str] = None,
         max_tokens: int = 1_000_000,
         l1_size: int = 2048,
-        create: bool = True,
+        truncate: bool = False,
     ):
         self.path = path or default_context_path("py_context")
         self.max_tokens = max(1, int(max_tokens))
@@ -44,13 +44,42 @@ class TieredContext1M:
 
         target = Path(self.path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        total_bytes = self.max_tokens * RECORD_SIZE
-        self._fd = os.open(str(target), os.O_RDWR | os.O_CREAT | (os.O_TRUNC if create else 0), 0o644)
+        total_bytes = (self.max_tokens + 1) * RECORD_SIZE  # records + 8-byte header
+        flags = os.O_RDWR | os.O_CREAT | (os.O_TRUNC if truncate else 0)
+        self._fd = os.open(str(target), flags, 0o644)
         current = os.fstat(self._fd).st_size
         if current < total_bytes:
             os.ftruncate(self._fd, total_bytes)
         self._mmap = mmap.mmap(self._fd, total_bytes, access=mmap.ACCESS_WRITE)
         self._closed = False
+        if not truncate:
+            self._restore_state()
+
+    # ----------------------------------------------------------- persistence
+    def _restore_state(self) -> None:
+        """Reuse a context file from a previous session instead of losing it.
+
+        The record area is a ring; the small header after it stores how many
+        records are live, so a reopened store continues where it stopped.
+        """
+        try:
+            header = struct.unpack_from("<Q", self._mmap, self.max_tokens * RECORD_SIZE)
+            count = int(header[0])
+            if 0 <= count <= self.max_tokens:
+                self.count = count
+                for pos in range(self.count):
+                    token_id, sig = struct.unpack_from(RECORD_FMT, self._mmap, pos * RECORD_SIZE)
+                    self.buckets.setdefault(sig & 0xFFFF, []).append(pos)
+                    self.l1_window.append((token_id, sig))
+        except (struct.error, ValueError):  # older/foreign file: start fresh
+            self.count = 0
+            self.buckets.clear()
+            self.l1_window.clear()
+
+    def _write_header(self) -> None:
+        if self._closed:
+            return
+        struct.pack_into("<Q", self._mmap, self.max_tokens * RECORD_SIZE, self.count)
 
     # ------------------------------------------------------------------ write
     def append(self, token_id: int, simhash: int) -> None:
@@ -61,6 +90,7 @@ class TieredContext1M:
         self.buckets.setdefault(simhash & 0xFFFF, []).append(self.count)
         self.l1_window.append((token_id, simhash))
         self.count += 1
+        self._write_header()
 
     def append_many(self, pairs: "List[Tuple[int, int]]") -> int:
         written = 0
