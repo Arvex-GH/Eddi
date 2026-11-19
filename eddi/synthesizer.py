@@ -5,7 +5,7 @@ Eddi's WritableKnowledgeBase, rather than echoing verbatim n-grams.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict
 from .agent import EddiAgent
 
 

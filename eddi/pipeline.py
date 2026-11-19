@@ -1,4 +1,9 @@
-"""Dataset Ingestion & Knowledge Teaching Pipeline for Eddi."""
+"""Dataset ingestion helpers.
+
+The canonical training pipeline now lives in :mod:`eddi.training` (it supports
+epochs, held-out evaluation and portable brain files).  This module keeps the
+original, dependency-free ingestion helpers for backwards compatibility.
+"""
 
 import json
 import os
@@ -75,20 +80,28 @@ def ingest_dir(agent: EddiAgent, dir_path: str, exts: Tuple[str, ...] = (".txt",
 
 
 def save_knowledge(agent: EddiAgent, out_path: str) -> None:
-    state = {
-        "facts": agent.kb.facts,
-        "transitions": dict(agent.transitions),
-    }
-    with open(out_path, "wb") as f:
-        pickle.dump(state, f)
+    """Save facts + language model in the portable brain format (see training.py)."""
+    from .training import save_brain
+
+    save_brain(agent, out_path)
 
 
 def load_knowledge(agent: EddiAgent, in_path: str) -> None:
+    """Load a brain file, including legacy fact-only pickles."""
+    from .training import BRAIN_FORMAT
+
     with open(in_path, "rb") as f:
         state = pickle.load(f)
-    agent.kb.facts = state["facts"]
-    for s, r, o, _ in agent.kb.facts:
-        agent.kb.get_or_create(s)
-        agent.kb.get_or_create(r)
-        agent.kb.get_or_create(o)
-    agent.transitions.update(state["transitions"])
+    if isinstance(state, dict) and state.get("format") == BRAIN_FORMAT:
+        from .language import NGramLanguageModel
+
+        agent.kb.import_facts([(s, r, o) for s, r, o, _hv in agent.kb.facts])
+        agent.kb.import_facts(state.get("facts", []))
+        agent.lm = NGramLanguageModel.from_payload(state["language_model"])
+        agent.transitions = state.get("transitions", {})
+        return
+    # legacy format: facts carried HyperVectors, so re-write the triples
+    for fact in state.get("facts", []):
+        subject, relation, obj = fact[0], fact[1], fact[2]
+        agent.kb.write_fact(subject, relation, obj)
+    agent.transitions.update(state.get("transitions", {}))

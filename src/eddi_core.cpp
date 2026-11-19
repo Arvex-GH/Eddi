@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -68,7 +69,24 @@ struct HyperVector {
     }
 };
 
-static uint64_t fnv1a_64(const std::string& s) {
+// Cross-platform temp directory: Windows has no /tmp.
+static std::string temp_file(const char* name) {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetTempPathA(MAX_PATH, buf);
+    if (n == 0 || n > MAX_PATH) return std::string(name);
+    std::string base(buf, n);
+    if (!base.empty() && base.back() != '\\' && base.back() != '/') base.push_back('\\');
+    return base + name;
+#else
+    const char* tmp = std::getenv("TMPDIR");
+    std::string base = (tmp && *tmp) ? std::string(tmp) : std::string("/tmp");
+    if (!base.empty() && base.back() != '/') base.push_back('/');
+    return base + name;
+#endif
+}
+
+[[maybe_unused]] static uint64_t fnv1a_64(const std::string& s) {
     uint64_t h = 14695981039346656037ULL;
     for (unsigned char c : s) {
         h ^= c;
@@ -132,14 +150,29 @@ public:
         // Index into 16-bit LSH bucket for fast retrieval
         uint16_t bucket = static_cast<uint16_t>(sig & 0xFFFF);
         buckets_[bucket].push_back(count_);
-        if (l1_window_.size() >= L1_WINDOW) {
-            l1_window_.erase(l1_window_.begin());
+        // ring buffer: O(1) instead of vector::erase (which memmoves the window)
+        if (l1_window_.size() < L1_WINDOW) {
+            l1_window_.push_back(token_hash);
+        } else {
+            l1_window_[l1_head_] = token_hash;
+            l1_head_ = (l1_head_ + 1) % L1_WINDOW;
         }
-        l1_window_.push_back(token_hash);
         ++count_;
     }
 
+    bool is_open() const { return data_ != nullptr; }
     size_t size() const { return count_; }
+
+    // Most recent tokens in the RAM-resident L1 window (oldest first).
+    std::vector<uint64_t> l1_window() const {
+        if (l1_window_.size() < L1_WINDOW) return l1_window_;
+        std::vector<uint64_t> out;
+        out.reserve(L1_WINDOW);
+        for (size_t i = 0; i < L1_WINDOW; ++i) {
+            out.push_back(l1_window_[(l1_head_ + i) % L1_WINDOW]);
+        }
+        return out;
+    }
 
     std::vector<size_t> query_bucket(uint64_t sig, size_t limit = 8) const {
         uint16_t bucket = static_cast<uint16_t>(sig & 0xFFFF);
@@ -166,6 +199,7 @@ private:
     DiskTokenRecord* data_ = nullptr;
     size_t count_ = 0;
     std::vector<uint64_t> l1_window_;
+    size_t l1_head_ = 0;
     std::unordered_map<uint16_t, std::vector<size_t>> buckets_;
 };
 
@@ -183,7 +217,11 @@ int main(int argc, char** argv) {
     std::string cmd = argv[1];
     if (cmd == "bench") {
         size_t n = (argc >= 3) ? std::stoull(argv[2]) : 1000000ULL;
-        MMapContextStore store("/tmp/eddi_context.mmap", n + 1024);
+        MMapContextStore store(temp_file("eddi_context.mmap"), n + 1024);
+        if (!store.is_open()) {
+            std::cerr << "error: could not open memory-mapped context file\n";
+            return 1;
+        }
 
         auto t0 = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < n; ++i) {
