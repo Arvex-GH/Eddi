@@ -196,6 +196,7 @@ class Reasoner:
             self._handle_when,
             self._handle_relation_question,
             self._handle_phrase_lookup,
+            self._handle_which,
             self._handle_types_of,
             self._handle_compare,
             self._handle_count,
@@ -1061,6 +1062,75 @@ class Reasoner:
             confidence=1.0,
             details=[f"memory: ({subject}, {relation}) -> {hits[0][0]}"],
         )
+
+    def _handle_which(self, text: str) -> Optional[Answer]:
+        """Answer 'which planet does the Moon orbit' - a categorised ask.
+
+        English inserts a category noun between the question word and the verb
+        ("which *planet* does the Moon orbit"), and the plain relation handler
+        never sees a clean "verb + subject" pattern. The category is a hint
+        about the expected kind of answer, not a constraint: if the knowledge
+        base knows what the Moon orbits, that is the answer, and the hint only
+        decides how to phrase it.
+        """
+        stripped = text.strip()
+        match = re.match(
+            r"^which\s+([a-z][a-z\s]{0,24}?)\s+"
+            r"(?:does|do|is|are|was|were|had|has|have)\s+"
+            r"(?:the\s+|a\s+|an\s+)?(.+?)\s*\??$",
+            stripped, re.IGNORECASE,
+        )
+        if not match:
+            return None
+        category = match.group(1).strip().lower()
+        rest = match.group(2).strip()
+
+        subject = self.agent.resolve_entity(rest)
+        # The verb precedes the subject in this form, so ask which relations
+        # this subject has and let the category pick among them.
+        if subject is not None:
+            facts = [(r, o) for s_, r, o, _h in self.agent.kb.facts if s_ == subject]
+            if facts:
+                preferred = [
+                    (r, o) for r, o in facts
+                    if category in r.lower().replace("_", " ")
+                    or category in o.lower().replace("_", " ")
+                ]
+                # Otherwise prefer a relation that names an action. "which
+                # planet does the Moon orbit" asks what the Moon *does*, so
+                # "orbits" answers it while "distance_from_earth_km" merely
+                # happens to be the Moon's first stored property.
+                if not preferred:
+                    preferred = [
+                        (r, o) for r, o in facts
+                        if not str(o).replace(".", "").isdigit()
+                        and not r.endswith(("_km", "_m", "_kg", "_c", "_years"))
+                    ]
+                relation, obj = (preferred or facts)[0]
+                return Answer(
+                    f"{self._render(obj)}.",
+                    kind="ask",
+                    confidence=1.0,
+                    details=[f"memory: ({subject}, {relation}) -> {obj}"],
+                )
+
+        # "which planet does the Moon orbit" also reads as "what does X verb",
+        # where the verb is resolvable on its own.
+        words = rest.split()
+        for split_at in range(len(words) - 1, 0, -1):
+            head, tail = " ".join(words[:split_at]), " ".join(words[split_at:])
+            relation = self.agent.resolve_relation(tail)
+            target = self.agent.resolve_entity(head)
+            if relation and target:
+                hits = self.agent.kb.query(target, relation)
+                if hits:
+                    return Answer(
+                        f"{self._render(hits[0][0])}.",
+                        kind="ask",
+                        confidence=1.0,
+                        details=[f"memory: ({target}, {relation}) -> {hits[0][0]}"],
+                    )
+        return None
 
     def _handle_types_of(self, text: str) -> Optional[Answer]:
         """Answer 'what orbits the Sun' - a class question, not an instance one.

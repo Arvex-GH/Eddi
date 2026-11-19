@@ -669,3 +669,21 @@ class TestTrainingPersistsItsText(unittest.TestCase):
                 self.assertGreater(len(loaded.lm.trained_sentences), 0)
             finally:
                 loaded.close(save=False)
+
+class TestInterrogativeForm(unittest.TestCase):
+    """'Which planet does the Moon orbit' must reach the fact base."""
+
+    def test_which_category_question_resolves(self):
+        import tempfile
+        agent = EddiAgent(lm_order=2, persist_context=False,
+                          memory_path=os.path.join(tempfile.mkdtemp(), "m.jsonl"))
+        try:
+            agent.teach("Moon", "orbits", "Earth")
+            agent.teach("Moon", "distance_from_earth_km", "384400")
+            reply = agent.answer("which planet does the Moon orbit")
+            # The relation that answers the question is an action, not the
+            # numerically-valued property that happens to sort first.
+            self.assertIn("Earth", reply.text)
+            self.assertNotIn("384400", reply.text)
+        finally:
+            agent.close(save=False)
