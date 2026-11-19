@@ -142,6 +142,7 @@ class Reasoner:
             return Answer("(empty message)", kind="noop")
 
         for handler in (
+            self._handle_identity,
             self._handle_math,
             self._handle_teach_rule,
             self._handle_teach_alias,
@@ -439,6 +440,40 @@ class Reasoner:
             f"{c} --{relation}--> {obj}  (by analogy with {a} --{relation}--> {b}, score {score:.2f})",
             kind="analogy",
             confidence=score,
+        )
+
+
+    def _handle_identity(self, text: str) -> Optional[Answer]:
+        """Answer questions about Eddi himself from written memory (no guessing)."""
+        lowered = " " + re.sub(r"[^a-z ]+", " ", text.lower()) + " "
+        identity_markers = (
+            " your name ", " your identity ", " who are you ", " what are you ",
+            " tell me about yourself ", " introduce yourself ", " who is eddi ",
+            " what is eddi ", " about yourself ", " your purpose ", " what do you do ",
+        )
+        if not any(marker in lowered for marker in identity_markers):
+            return None
+
+        name = self.agent.resolve_entity("eddi") or "Eddi"
+        name_hits = self.agent.kb.query(name, "name", top_k=1)
+        facts = self.agent.kb.facts_about(name)
+        if not facts:
+            return Answer(
+                "I'm Eddi. I don't have any facts written about me yet - "
+                "try 'teach Eddi | purpose | ...'.",
+                kind="identity",
+                confidence=1.0,
+            )
+        lines = [f"My name is {name_hits[0][0] if name_hits else name}."]
+        for relation, obj, _conf in facts:
+            if relation == "name":
+                continue
+            lines.append(f"  {relation.replace('_', ' ')}: {obj.replace('_', ' ')}")
+        return Answer(
+            "\n".join(lines),
+            kind="identity",
+            confidence=1.0,
+            details=["answered from written memory, not from the language model"],
         )
 
     # ------------------------------------------------------------------- math

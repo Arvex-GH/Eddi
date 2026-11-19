@@ -248,6 +248,17 @@ class TestAgentAndReasoning(unittest.TestCase):
         ans = self.agent.ask("Eddi", "status")
         self.assertTrue(any("working" in a for a in ans))
 
+    def test_agent_knows_its_own_name(self):
+        a = EddiAgent(persist_context=False)
+        a.teach("Eddi", "name", "Eddi")
+        a.teach("Eddi", "type", "local_agent")
+        for question in ("what is your name", "who are you", "tell me about yourself"):
+            with self.subTest(question=question):
+                answer = a.answer(question)
+                self.assertEqual(answer.kind, "identity")
+                self.assertIn("Eddi", answer.text)
+                self.assertEqual(a.lm.trained_tokens, 0)
+
     def test_question_routing(self):
         cases = {
             "ask Earth | orbits": "Sun",

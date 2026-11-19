@@ -21,6 +21,9 @@ Fact = Tuple[str, str, str]
 
 # --------------------------------------------------------------------- facts
 CORE_FACTS: List[Fact] = [
+    ("Eddi", "name", "Eddi"),
+    ("Eddi", "type", "local_hyperdimensional_agent"),
+    ("Eddi", "runs_on", "consumer_hardware_no_gpu"),
     ("Eddi", "architecture", "HDC_plus_disk_backed_context"),
     ("Eddi", "uses", "hyperdimensional_computing"),
     ("Eddi", "memory_model", "writable_hypervectors_no_backprop"),
