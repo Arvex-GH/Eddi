@@ -377,3 +377,36 @@ class TestHonesty(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCapabilitySuite(unittest.TestCase):
+    """The 100-question suite is a deliverable, so it must not silently rot."""
+
+    def test_suite_has_one_hundred_questions(self):
+        from eddi.eval_questions import SUITE
+
+        self.assertGreaterEqual(len(SUITE), 100)
+
+    def test_every_question_declares_a_distinct_ability(self):
+        from eddi.eval_questions import SUITE
+
+        abilities = {case.ability for case in SUITE}
+        self.assertGreaterEqual(len(abilities), 50, "suite collapses to few abilities")
+
+    def test_every_question_declares_an_expectation(self):
+        # A case with no expected substrings and no kind constraint can only
+        # pass by accident.
+        from eddi.eval_questions import SUITE
+
+        for case in SUITE:
+            with self.subTest(question=case.question):
+                self.assertTrue(case.expect or case.kinds, "case asserts nothing")
+
+    def test_suite_passes(self):
+        from eddi.eval_questions import run
+
+        report = run()
+        failures = [r for r in report["results"] if not r["ok"]]
+        self.assertEqual(
+            failures, [], "\n".join(f"{r['question']} -> {r['answer'][:60]}" for r in failures)
+        )

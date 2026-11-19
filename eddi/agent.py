@@ -193,9 +193,25 @@ class EddiAgent:
             if relation in known:
                 return relation
         key = normalise_symbol(text)
+        known = []
         for relation in self._all_relations():
             if relation[1] == key:
                 return relation[1]
+            known.append(relation[1])
+        unique = list(dict.fromkeys(known))
+        # 'port' should find 'port_default': the stored name is more specific
+        # than the phrase, and there is exactly one candidate.
+        matches = [r for r in unique if r.startswith(key + "_")]
+        if len(matches) == 1:
+            return matches[0]
+        # 'default port' should also find 'port_default'. Try each trailing
+        # word-run, so leading modifiers don't block the match.
+        words = key.split("_")
+        for start in range(1, len(words)):
+            tail = "_".join(words[start:])
+            matches = [r for r in unique if r == tail or r.startswith(tail + "_")]
+            if len(matches) == 1:
+                return matches[0]
         return None
 
     def _all_relations(self):

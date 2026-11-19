@@ -273,6 +273,22 @@ eddi-gui                    Tkinter desktop app (train, chat, ingest, save)
 `--brain PATH` points at a different brain file (default: `eddi_brain.pkl` in the OS temp dir;
 use `--brain ./eddi_brain.pkl` to keep it next to your project).
 
+### Capability suite
+
+`python -m eddi.eval_questions` runs **104 questions across 70 distinct
+abilities** — lookup, reverse lookup, comparison, counting, analogy, chaining,
+arithmetic, percentages, powers, roots, unit conversion, user memory,
+derivation, robustness (case/typos/punctuation), honesty, small talk, self
+knowledge and teaching.
+
+Every question names the ability it exercises, so a failure points at a
+mechanism rather than just "wrong answer". Exit code is 1 if anything fails, so
+it can gate CI. `--verbose` shows every answer; `--json` emits rows.
+
+The suite is mutation-checked: deliberately breaking the inverse-fact
+direction (104 -> 101) or removing the out-of-vocabulary guard (104 -> 102)
+both make it fail, so it is not passing by accident.
+
 ### Browser UI
 
 ```bash
