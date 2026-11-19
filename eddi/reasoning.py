@@ -542,33 +542,81 @@ class Reasoner:
         return Answer(f"{_format_number(value)}", kind="math", confidence=1.0, details=[f"evaluated `{expr}`"])
 
     # ------------------------------------------------------------- fallbacks
+    # Words that carry no question on their own. Used to decide whether a
+    # message is *only* a pleasantry, so "hi, what is python?" still routes to
+    # the knowledge handlers while "hi how are you?" gets a greeting.
+    _CHITCHAT_WORDS = frozenset(
+        """
+        hi hello hey yo hallo servus moin hola ciao greetings howdy
+        good morning afternoon evening night day
+        how are is it you you're your doing going there thanks thank
+        appreciate cheers bye goodbye cya later see soon ok okay
+        eddi please and so too very much really
+        """.split()
+    )
+
+    _GREETING_OPENERS = re.compile(
+        r"^\s*(?:hi|hello|hey|yo|hallo|servus|moin|hola|ciao|howdy|greetings"
+        r"|good\s+(?:morning|afternoon|evening|day))\b",
+        re.IGNORECASE,
+    )
+    _THANKS = re.compile(r"^\s*(?:thanks|thank\s+you|cheers|ta)\b", re.IGNORECASE)
+    _FAREWELL = re.compile(
+        r"^\s*(?:bye|goodbye|good\s+bye|see\s+(?:you|ya)|cya|later|good\s+night)\b",
+        re.IGNORECASE,
+    )
+    _HOW_ARE_YOU = re.compile(
+        r"\b(?:how\s+are\s+(?:you|u)|how'?s\s+it\s+going|how\s+you\s+doing"
+        r"|how\s+do\s+you\s+(?:do|feel)|are\s+you\s+(?:ok|okay|well|alright))\b",
+        re.IGNORECASE,
+    )
+
+    def _is_small_talk(self, text: str) -> bool:
+        """True when nothing in the message could be a question about knowledge.
+
+        A message is small talk if it opens with a greeting/thanks/farewell and
+        every remaining word is itself chit-chat. That keeps "hi" and
+        "hi how are you?" together while letting "hi, what is python?" through
+        to the knowledge handlers, where the real question lives.
+        """
+        words = [w for w in re.findall(r"[a-z']+", text.lower())]
+        if not words:
+            return False
+        # "how are you?" has no greeting word, so the opener test alone misses it.
+        if not (
+            self._GREETING_OPENERS.search(text)
+            or self._THANKS.search(text)
+            or self._FAREWELL.search(text)
+            or self._HOW_ARE_YOU.search(text)
+        ):
+            return False
+        return all(w in self._CHITCHAT_WORDS for w in words)
+
     def _handle_greeting(self, text: str) -> Optional[Answer]:
-        lowered = text.lower().strip("!.? ")
-        greetings = {"hi", "hello", "hey", "yo", "hallo", "servus", "moin"}
-        if lowered in greetings:
+        if not self._is_small_talk(text):
+            return None
+
+        if self._THANKS.search(text):
             return Answer(
-                "Hi! I'm Eddi. I remember facts, reason over them, do math and write text. "
-                "Try: teach Earth has_moon Moon | what is the moon of earth | Earth is to Sun as Moon is to ?",
+                "Any time. Ask me something else whenever you like.",
                 kind="greeting",
             )
-        if lowered in {"help", "commands", "?"}:
+        if self._FAREWELL.search(text):
             return Answer(
-                "Commands:\n"
-                "  teach <subject> | <relation> | <object>\n"
-                "  teach <subject> has <relation> <object>\n"
-                "  ask <subject> | <relation>\n"
-                "  what is the <relation> of <subject>\n"
-                "  tell me about <subject>\n"
-                "  how is <a> related to <b>\n"
-                "  chain <start> | <rel1> | <rel2>\n"
-                "  rule <rel1> => <rel2>      (writable inference, no training)\n"
-                "  alias <phrase> = <canonical>\n"
-                "  <a> is to <b> as <c> is to ?\n"
-                "  2 + 2 * 10\n"
-                "  anything else -> language-model continuation",
-                kind="help",
+                "See you. I keep what you taught me between sessions.",
+                kind="greeting",
             )
-        return None
+        if self._HOW_ARE_YOU.search(text):
+            return Answer(
+                "I'm doing well, thanks for asking - I'm a small program, so my mood "
+                "is mostly intact memory. What can I help with?",
+                kind="greeting",
+            )
+        return Answer(
+            "Hi! I'm Eddi. I remember facts, reason over them, do math and write text. "
+            "Try: teach Earth has_moon Moon | what is the moon of earth | Earth is to Sun as Moon is to ?",
+            kind="greeting",
+        )
 
     def _handle_generate(self, text: str) -> Answer:
         if self.agent.lm.trained_tokens == 0:

@@ -264,6 +264,25 @@ class TestHonesty(unittest.TestCase):
                 f"generated text echoed the prompt: {answer.text!r}",
             )
 
+    def test_greeting_with_a_follow_up_is_a_greeting(self):
+        # "Hi how are you?" is small talk, not a knowledge lookup. It used to
+        # fall through to the n-gram model and answer about something else.
+        answer = self.agent.answer("Hi how are you?")
+        self.assertEqual(answer.kind, "greeting")
+
+    def test_bare_pleasantries_are_recognised(self):
+        for text in ("Hi", "hello", "Hello there", "hey eddi", "good morning",
+                     "how are you?", "thanks", "thank you", "bye", "good afternoon"):
+            with self.subTest(text=text):
+                self.assertEqual(self.agent.answer(text).kind, "greeting")
+
+    def test_greeting_does_not_swallow_a_real_question(self):
+        # A pleasantry followed by a question must still answer the question.
+        for text in ("hi, what is python?", "Hi! Tell me about water"):
+            with self.subTest(text=text):
+                answer = self.agent.answer(text)
+                self.assertIn(answer.kind, {"about", "ask"})
+
     def test_refusal_does_not_prescribe_cli_syntax(self):
         # Browser users cannot type shell commands; the UI offers a form.
         answer = self.agent.answer("tell me about an unladen swallow")
