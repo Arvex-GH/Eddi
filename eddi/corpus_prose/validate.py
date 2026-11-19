@@ -29,7 +29,14 @@ from typing import Dict, List, Sequence
 #: rule can catch.
 _VERB_HINTS = frozenset(
     """is are was were be been being has have had does do did can could will
-    would should must may might""".split()
+    would should must may might fell fell rose grew became began came went
+    took gave made sold held led won lost spread stood ran brought bought
+    taught thought kept left met paid read sent set spent spoke built burnt
+    """ .split()
+    + """fallen risen grown become begun come gone taken given made sold held
+    led won lost spread stood run brought bought taught thought kept left met
+    paid read sent set spent spoken built burnt wrote written drove driven
+    chose chosen broke broken drew drawn knew known saw seen""".split()
 )
 _VERB_SUFFIXES = ("s", "es", "ed", "ing", "ies", "ied")
 
