@@ -21,6 +21,7 @@ so the CLI, desktop UI and tests can show the reasoning trace.
 from __future__ import annotations
 
 import ast
+import datetime
 import operator
 import re
 from dataclasses import dataclass, field
@@ -150,6 +151,7 @@ class Reasoner:
             self._handle_teach,
             self._handle_tell_about_self,
             self._handle_ask_about_self,
+            self._handle_birth_year,
             self._handle_chain,
             self._handle_analogy,
             self._handle_relations,
@@ -390,6 +392,71 @@ class Reasoner:
                 details=[f"memory: ({self.USER_SUBJECT}, {relation})"],
             )
         return None
+
+    # Questions whose answer is *computed* from a stored fact plus the current
+    # date, not looked up. Kept separate from _handle_ask because the value was
+    # never written down - deriving it is the whole point.
+    _BIRTH_YEAR_Q = re.compile(
+        r"\b(?:which|what)\s+(?:year|date)\s+(?:was|am)\s+i\s+born"
+        r"|\bwhen\s+was\s+i\s+born"
+        r"|\byear\s+(?:of\s+my\s+)?birth\b"
+        r"|\bborn\s+in\s+which\s+year",
+        re.IGNORECASE,
+    )
+    # "if I am 16" / "I am 16" inside a question - an explicit value to use.
+    _INLINE_AGE = re.compile(r"\b(?:if\s+)?i(?:'m|\s+am)\s+(\d{1,3})\b", re.IGNORECASE)
+
+    def _handle_birth_year(self, text: str) -> Optional[Answer]:
+        """Compute a birth year from an age and the current date.
+
+        The age may be stated in the question ("if I am 16 ...") or already known
+        from something the user told Eddi. The result is a range, not a single
+        year, because an age does not fix a birthday: someone who is 16 today was
+        born in the current year minus 16, or minus 17 if their birthday has not
+        yet passed.
+        """
+        if not self._BIRTH_YEAR_Q.search(text):
+            return None
+
+        source = ""
+        inline = self._INLINE_AGE.search(text)
+        if inline:
+            age = int(inline.group(1))
+            source = f"the age of {age} in your question"
+        else:
+            stored = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, "age")]
+            digits = [o for o in stored if str(o).strip().isdigit()]
+            if not digits:
+                return Answer(
+                    "I don't know your age yet - tell me ('I am 16 years old') and ask again.",
+                    kind="unknown",
+                    details=["no fact stored for (user, age)"],
+                )
+            age = int(str(digits[0]).strip())
+            source = f"your age, {age}, which you told me"
+
+        if not 0 <= age <= 130:
+            return Answer(
+                f"{age} is not a plausible age, so I can't work out a birth year from it.",
+                kind="math_error",
+            )
+
+        this_year = datetime.date.today().year
+        latest = this_year - age          # birthday already passed this year
+        earliest = this_year - age - 1    # birthday still to come
+        return Answer(
+            f"You were born in {earliest} or {latest}.\n"
+            f"  working: {this_year} - {age} = {latest}. "
+            f"Because an age alone does not fix a birthday, someone who is {age} "
+            f"today could have been born in {earliest} (birthday not yet reached) "
+            f"or {latest} (birthday already passed).",
+            kind="derive",
+            confidence=1.0,
+            details=[
+                f"computed from {source} and today's date ({this_year})",
+                "no fact for a birth year was stored; this is derived, not remembered",
+            ],
+        )
 
     def _handle_ask(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:ask|query)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)

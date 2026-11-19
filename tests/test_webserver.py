@@ -324,6 +324,50 @@ class TestHonesty(unittest.TestCase):
         self.assertEqual(self.agent.answer("tell me about water").kind, "about")
         self.assertEqual(self.agent.answer("what is 12 * 37?").kind, "math")
 
+    # ---------------------------------------------------------- derivation
+    def test_birth_year_from_stored_age(self):
+        import datetime
+
+        self.agent.answer("I am 16 years old")
+        answer = self.agent.answer("which year was I born")
+        self.assertEqual(answer.kind, "derive")
+        year = datetime.date.today().year
+        # An age does not fix a birthday, so both years must be offered.
+        self.assertIn(str(year - 16), answer.text)
+        self.assertIn(str(year - 17), answer.text)
+
+    def test_birth_year_from_age_in_the_question(self):
+        # The exact phrasing that failed: punctuation splits the sentence.
+        import datetime
+
+        answer = self.agent.answer("If I am 16. Which year was i born in?")
+        self.assertEqual(answer.kind, "derive")
+        self.assertIn(str(datetime.date.today().year - 16), answer.text)
+
+    def test_birth_year_without_any_age_is_admitted(self):
+        answer = self.agent.answer("which year was I born")
+        self.assertEqual(answer.kind, "unknown")
+        self.assertIn("don't know your age", answer.text.lower())
+
+    def test_birth_year_does_not_invent_a_single_certain_answer(self):
+        # Reporting one year as fact would be wrong for half of all people.
+        self.agent.answer("I am 16 years old")
+        self.assertIn(" or ", self.agent.answer("which year was I born").text)
+
+    def test_absurd_age_is_rejected(self):
+        answer = self.agent.answer("if I am 999 which year was I born")
+        self.assertEqual(answer.kind, "math_error")
+
+    def test_derivation_does_not_hijack_other_questions(self):
+        self.agent.answer("I am 16 years old")
+        self.assertEqual(self.agent.answer("tell me about water").kind, "about")
+        self.assertEqual(self.agent.answer("what is 12 * 37?").kind, "math")
+
+    def test_derived_answer_shows_its_working(self):
+        self.agent.answer("I am 16 years old")
+        answer = self.agent.answer("which year was I born")
+        self.assertIn("working", answer.text.lower())
+
     def test_refusal_does_not_prescribe_cli_syntax(self):
         # Browser users cannot type shell commands; the UI offers a form.
         answer = self.agent.answer("tell me about an unladen swallow")
