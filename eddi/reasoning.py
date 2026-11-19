@@ -142,6 +142,7 @@ class Reasoner:
             return Answer("(empty message)", kind="noop")
 
         for handler in (
+            self._handle_webpage,
             self._handle_identity,
             self._handle_math,
             self._handle_teach_rule,
@@ -160,6 +161,40 @@ class Reasoner:
         return self._handle_generate(text)
 
     # ------------------------------------------------------------- knowledge
+    def _handle_webpage(self, text: str) -> Optional[Answer]:
+        """Compose an HTML page from written components (no sampling, no training)."""
+        match = re.match(
+            r"^(?:make|create|build|generate|write)\s+(?:me\s+)?(?:a|an)?\s*(?:nice|good|pretty|beautiful|simple)?\s*"
+            r"(landing\s+page|web\s*page|page|website|site|dashboard|article)\s*"
+            r"(?:for|about|on)?\s*(.*)$",
+            text.strip(), re.IGNORECASE,
+        )
+        if not match:
+            match = re.match(r"^(?:make|create|build|generate)\s+(?:me\s+)?(?:a|an)?\s*(\w+)\s*page"
+                             r"(?:\s+(?:for|about|on)\s+(.*))?$", text.strip(), re.IGNORECASE)
+        if not match:
+            return None
+        kind = (match.group(1) or "").lower()
+        topic = (match.group(2) or "").strip()
+        request = f"{kind} for {topic}" if topic else f"{kind} page"
+        from .html_library import HtmlBuilder, spec_from_request
+
+        spec = spec_from_request(request)
+        if kind == "article":
+            spec.layout = "article"
+        elif kind == "dashboard":
+            spec.layout = "dashboard"
+        page = HtmlBuilder().build(spec)
+        return Answer(
+            page,
+            kind="webpage",
+            confidence=1.0,
+            details=[
+                f"layout={spec.layout}",
+                "composed from written components; the language model was not used",
+            ],
+        )
+
     def _handle_teach_rule(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:rule|when)\s*[:\-]?\s*(.+?)\s*(?:=>|->|implies)\s*(.+?)[\.]*$",
                          text, re.IGNORECASE)

@@ -104,6 +104,43 @@ and they are independent - the table at the top of this section is the whole poi
 `--train` is optional: a fresh agent with zero trained tokens already answers facts,
 follows rules, resolves aliases, chains, and does analogies.
 
+## Can Eddi build a good-looking web page?
+
+Yes - but not by sampling tokens. Asked to "generate HTML" Eddi's n-gram model produces
+`< div class = " title > < html >` - it has no model of tag nesting or CSS. So page
+building goes through the **written** path, which is the whole point of the architecture:
+
+```bash
+eddi --web "landing page for a coffee shop"        # -> landing.html
+eddi --web "dashboard for server metrics"          # -> dashboard.html
+eddi --web "page for my dog" --layout landing
+```
+
+What it composes (13 components, 13 design tokens, 4 layouts - all written):
+
+| Layer | Contents |
+|---|---|
+| Design tokens | palette, spacing, radii, shadow, system font stack |
+| CSS | responsive, mobile breakpoint, hover/active states, accessible contrast |
+| Components | `nav`, `hero`, `card`, `grid_three`, `table`, `section`, `button`, `button_js`, `footer`, `list`, `page` |
+| Layouts | `landing`, `dashboard`, `article`, `blank` |
+| Content packs | topic-aware copy for coffee, servers, dogs, HDC (add your own) |
+
+Three example pages are in [`examples/pages/`](examples/pages): a coffee-shop landing page,
+a server dashboard and an article - each a single self-contained file with no dependencies.
+
+**It is extensible by writing, not training:**
+
+```python
+from eddi.html_library import HtmlBuilder
+builder = HtmlBuilder()
+builder.teach_component("card", "<article class='custom'>{title}</article>")
+```
+
+`trained_tokens` stays at 0 throughout. Tests verify the output parses with balanced tags,
+carries a viewport meta and stylesheet, and escapes user text (so a title of
+`<script>alert(1)</script>` cannot inject a script).
+
 ## What makes Eddi smart
 
 | Capability | How it works | Where |

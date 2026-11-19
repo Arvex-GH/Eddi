@@ -168,6 +168,78 @@ class TestWritableInference(unittest.TestCase):
                 b.close()
 
 
+class TestHtmlComposition(unittest.TestCase):
+    """Eddi composes pages from written components - the language model is not used."""
+
+    def test_generated_pages_are_well_formed(self):
+        from html.parser import HTMLParser
+
+        from eddi.html_library import HtmlBuilder, spec_from_request
+
+        class Balance(HTMLParser):
+            VOID = {"meta", "br", "hr", "img", "input", "link"}
+
+            def __init__(self):
+                super().__init__()
+                self.stack: list = []
+                self.errors: list = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag not in self.VOID:
+                    self.stack.append(tag)
+
+            def handle_endtag(self, tag):
+                if not self.stack:
+                    self.errors.append(f"stray </{tag}>")
+                elif self.stack[-1] == tag:
+                    self.stack.pop()
+                else:
+                    self.errors.append(f"mismatch {self.stack[-1]}/{tag}")
+                    while self.stack and self.stack[-1] != tag:
+                        self.stack.pop()
+                    if self.stack:
+                        self.stack.pop()
+
+        builder = HtmlBuilder()
+        for request in (
+            "landing page for a coffee shop",
+            "dashboard for server metrics",
+            "article about hyperdimensional computing",
+        ):
+            with self.subTest(request=request):
+                page = builder.build(spec_from_request(request))
+                checker = Balance()
+                checker.feed(page)
+                self.assertEqual(checker.errors, [])
+                self.assertEqual(checker.stack, [])
+                for required in ("<!DOCTYPE html>", 'name="viewport"', "<style>", "</html>"):
+                    self.assertIn(required, page)
+
+    def test_components_are_writable(self):
+        from eddi.html_library import HtmlBuilder, spec_from_request
+
+        builder = HtmlBuilder()
+        builder.teach_component("card", "<article class='custom'>{title}</article>")
+        page = builder.build(spec_from_request("landing page for coffee"))
+        self.assertIn("custom", page)
+        self.assertNotIn('class="card"', page)
+
+    def test_agent_routes_page_requests_without_training(self):
+        a = EddiAgent(persist_context=False)
+        answer = a.answer("make a landing page for a coffee shop")
+        self.assertEqual(answer.kind, "webpage")
+        self.assertIn("Coffee Shop", answer.text)
+        self.assertEqual(a.lm.trained_tokens, 0)
+
+    def test_html_is_escaped(self):
+        from eddi.html_library import HtmlBuilder, PageSpec
+
+        builder = HtmlBuilder()
+        page = builder.build(PageSpec(title="<script>alert(1)</script>", brand="x", heading="x"))
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;", page)
+
+
 class TestLanguageModel(unittest.TestCase):
     def test_training_and_distribution_normalised(self):
         lm = NGramLanguageModel(order=3)

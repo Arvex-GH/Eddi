@@ -152,6 +152,21 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    from .html_library import HtmlBuilder, spec_from_request
+
+    spec = spec_from_request(args.web)
+    if args.layout:
+        spec.layout = args.layout
+    page = HtmlBuilder().build(spec)
+    out = args.out or f"{spec.layout or 'page'}.html"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(page)
+    print(f"Wrote {out} ({len(page):,} chars, layout={spec.layout}, title={spec.title!r})")
+    print("Open it in any browser - no build step, no dependencies.")
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     agent = _load_agent(args.brain)
     print("Eddi chat. 'help' for commands, 'quit' to exit.")
@@ -247,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--chat", action="store_true", help="interactive chat")
     mode.add_argument("--serve", action="store_true", help="serve a JSON HTTP API")
     mode.add_argument("--ask", metavar="QUESTION", help="answer one question and exit")
+    mode.add_argument(
+        "--web",
+        metavar="REQUEST",
+        help="compose an HTML page from written components, e.g. --web 'landing page for a coffee shop'",
+    )
 
     parser.add_argument("--pack", action="append", help="curriculum pack (repeatable)")
     parser.add_argument("--corpus", action="append", help="directory of text files to learn (repeatable)")
@@ -264,6 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="save the brain after --ask (persists facts/rules/aliases written by your question)",
     )
+    parser.add_argument("--layout", choices=["landing", "article", "dashboard", "blank"],
+                        help="force a page layout for --web")
+    parser.add_argument("--out", help="output file for --web (default: <layout>.html)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser
@@ -280,6 +303,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_chat(args)
     if args.serve:
         return cmd_serve(args)
+    if args.web:
+        return cmd_web(args)
     if args.ask:
         return cmd_ask(args)
     if args.demo:
