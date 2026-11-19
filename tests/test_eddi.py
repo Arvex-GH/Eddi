@@ -10,7 +10,7 @@ from eddi.agent import EddiAgent
 from eddi.hdc import HyperVector, WritableKnowledgeBase
 from eddi.language import NGramLanguageModel, tokenize
 from eddi.paths import core_binary_name, default_context_path, find_core_binary
-from eddi.training import TrainingConfig, load_brain, train
+from eddi.training import TrainingConfig, load_brain, save_brain, train
 
 
 class TestHyperVectors(unittest.TestCase):
@@ -95,6 +95,77 @@ class TestWritableKnowledgeBase(unittest.TestCase):
         kb.write_fact("Eddi", "knows", "physics")
         top = kb.probe("Eddi", "knows", top_k=1)[0][0]
         self.assertIn(top, {"math", "code", "physics"})
+
+
+class TestWritableInference(unittest.TestCase):
+    """Smartness that comes from *writing*, not training."""
+
+    def test_zero_training_still_answers(self):
+        a = EddiAgent(persist_context=False)
+        self.assertEqual(a.lm.trained_tokens, 0)
+        a.teach("Phobos", "orbits", "Mars")
+        self.assertEqual(a.answer("what does Phobos orbit").text, "Phobos --orbits--> Mars")
+        self.assertEqual(a.lm.trained_tokens, 0, "answering must not require training")
+
+    def test_rule_adds_inference_without_training(self):
+        a = EddiAgent(persist_context=False)
+        a.answer("rule is_a => warm_blooded")
+        a.teach("cat", "is_a", "mammal")
+        self.assertEqual(a.lm.trained_tokens, 0)
+        self.assertIn("mammal", a.answer("what is the warm_blooded of cat").text)
+
+    def test_transitive_closure_rule(self):
+        kb = WritableKnowledgeBase()
+        kb.import_facts(
+            [
+                ("cat", "is_a", "mammal"),
+                ("mammal", "is_a", "animal"),
+                ("animal", "is_a", "living_thing"),
+            ]
+        )
+        kb.add_rule("is_a", "is_a")
+        ancestors = sorted(o for o, _ in kb.query("cat", "is_a", top_k=10))
+        self.assertEqual(ancestors, ["animal", "living_thing", "mammal"])
+
+    def test_rules_are_idempotent(self):
+        kb = WritableKnowledgeBase()
+        kb.import_facts([("cat", "is_a", "mammal"), ("mammal", "is_a", "animal")])
+        kb.add_rule("is_a", "is_a")
+        total = len(kb)
+        self.assertEqual(kb.apply_rules(), 0)
+        self.assertEqual(len(kb), total)
+
+    def test_explain_shows_provenance(self):
+        kb = WritableKnowledgeBase()
+        kb.import_facts([("cat", "is_a", "mammal"), ("mammal", "is_a", "animal")])
+        kb.add_rule("is_a", "is_a")
+        explanation = kb.explain("cat", "is_a", "animal")
+        self.assertIsNotNone(explanation)
+        self.assertIn("written rule", explanation)
+        self.assertIsNone(kb.explain("cat", "is_a", "mammal"))
+
+    def test_alias_needs_no_training(self):
+        a = EddiAgent(persist_context=False)
+        a.answer("teach Mars | type | planet")
+        a.answer("alias the red planet = Mars")
+        self.assertIn("planet", a.answer("what is the type of the red planet").text)
+        self.assertEqual(a.lm.trained_tokens, 0)
+
+    def test_written_intelligence_survives_save_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = os.path.join(tmp, "writes.pkl")
+            a = EddiAgent(persist_context=False)
+            a.answer("rule is_a => warm_blooded")
+            a.teach("whale", "is_a", "mammal")
+            a.answer("alias sea giant = whale")
+            save_brain(a, brain)
+            b = load_brain(brain, persist_context=False)
+            try:
+                self.assertEqual(b.lm.trained_tokens, 0)
+                self.assertIn("mammal", b.answer("what is the warm_blooded of sea giant").text)
+                self.assertEqual(b.kb.rules, [("is_a", "warm_blooded")])
+            finally:
+                b.close()
 
 
 class TestLanguageModel(unittest.TestCase):

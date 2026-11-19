@@ -53,15 +53,68 @@ the C++ core is an optional accelerator.
 
 ---
 
+## Two ways to make Eddi smarter
+
+The original goal is preserved exactly: **you can write intelligence into Eddi without training anything.**
+
+| | Write (instant, 0 tokens trained) | Train (minutes, scales with corpus) |
+|---|---|---|
+| **What you add** | facts, rules, aliases, hierarchies | fluent language, word statistics |
+| **Cost** | one call, microseconds | O(corpus), ~164k tokens/sec |
+| **Answers via** | exact lookup, forward chaining, analogy, multi-hop | n-gram continuation |
+| **Survives save/load** | yes (`rules`, `aliases`, `derived` in the brain file) | yes (model in the brain file) |
+
+```bash
+# nothing is trained here - lm.trained_tokens stays 0
+# --save persists whatever your question wrote (facts, rules, aliases)
+eddi --ask "teach cat | is_a | mammal"          --save
+eddi --ask "rule is_a => warm_blooded"          --save   # writable inference
+eddi --ask "teach whale | is_a | mammal"        --save
+eddi --ask "alias sea giant = whale"            --save
+eddi --ask "what is the warm_blooded of sea giant"
+#   -> whale --warm_blooded--> mammal
+```
+
+```
+$ eddi --ask "teach whale | is_a | mammal" --save
+Learned: (whale) --is_a--> (mammal) (+1 derived by rules)
+```
+
+**Writable inference.** A rule is a write, not a gradient step. `rule is_a => warm_blooded`
+forward-chains over everything Eddi already knows:
+
+* `rule is_a => is_a` computes the **transitive closure** of a hierarchy
+  (`cat --is_a--> mammal --is_a--> animal` ⇒ `cat --is_a--> animal`),
+* `rule is_a => warm_blooded` propagates the conclusion up that hierarchy,
+* rules compose, run idempotently, and are re-checked on every `teach` so new
+  facts immediately inherit;
+* `kb.explain(subject, relation, object)` reports which written rule produced a fact
+  (derived facts are tracked separately from written ones).
+
+**Writable vocabulary.** `alias the red planet = Mars` makes Eddi understand a phrase
+it was never trained on, because resolution happens before the language model is involved.
+
+Scale check: a 120-level hierarchy (121 written facts) closes to **7,260 inferred facts
+in 0.33 s**. A 1,000-fact rule base stays in the low milliseconds.
+
+### What training still buys you
+
+Rules give *deduction over what you wrote*; training gives *language*. Eddi needs both,
+and they are independent - the table at the top of this section is the whole point.
+`--train` is optional: a fresh agent with zero trained tokens already answers facts,
+follows rules, resolves aliases, chains, and does analogies.
+
 ## What makes Eddi smart
 
 | Capability | How it works | Where |
 |---|---|---|
 | **Writable memory** | Facts `(subject, relation, object)` are written as 1024-bit hypervectors: `bind(S, R, O) = S ⊕ R ⊕ O`. Learning is a write, not a training step. | `eddi/hdc.py` |
+| **Writable inference** | `rule <rel1> => <rel2>` forward-chains (including transitive closure) over written facts; derived facts carry provenance and are explained on demand. | `eddi/hdc.py` |
+| **Writable vocabulary** | `alias <phrase> = <canonical>` adds synonyms with no retraining. | `eddi/hdc.py` |
 | **O(1) retrieval** | A writable hash index `(subject, relation) → objects` answers exactly; a lazily built **majority-vote bundle** plus HDC cleanup recovers objects even from noisy probes. | `eddi/hdc.py` |
 | **Trained language model** | Interpolated back-off n-gram model (default: 2-token context, `--order 3`) with **absolute discounting**: interpolation weights depend on evidence, so sparse long contexts cannot overrule solid short ones. Deeper contexts (`--order 4/5`) pay off on larger corpora. | `eddi/language.py` |
 | **Generalisation beyond n-grams** | A second learning channel over **word-type classes** (cheap stemming: `runs/running/ran → run`, numbers → `<num>`) lets unseen token contexts still be answered. | `eddi/language.py` |
-| **Reasoning router** | Questions are parsed and routed: teach, ask, attribute, about, relate, chain (multi-hop), analogy, math, generate — with honest "I don't know". | `eddi/reasoning.py` |
+| **Reasoning router** | Questions are parsed and routed: teach, rule, alias, ask, attribute, about, relate, chain (multi-hop), analogy, math, generate — with honest "I don't know". | `eddi/reasoning.py` |
 | **1M-token context** | L1 sliding window in RAM + L2 `mmap` ring buffer with 16-bit LSH buckets; ~9.2M tokens/sec ingestion in the C++ core. | `eddi/context.py`, `src/eddi_core.cpp` |
 | **Measurable training** | Held-out perplexity, in-vocabulary perplexity, bigram baseline, n-gram coherence, fact accuracy and reasoning accuracy after every training run. | `eddi/evaluation.py`, `eddi/training.py` |
 | **Portable brain** | Facts + model + counts serialise to one `.pkl` (`eddi-brain-v2`), loadable on any platform. | `eddi/training.py` |
@@ -152,7 +205,7 @@ eddi                        status: brain, size, C++ core, held-out perplexity
 eddi --demo                 capability tour (memory, analogy, chain, math, generation)
 eddi --train [--pack P]... [--corpus DIR]... [--epochs N] [--order N] [--prune N]
 eddi --bench [--json]       held-out benchmark with miss explanations
-eddi --ask "..." [--explain]
+eddi --ask "..." [--explain] [--save]
 eddi --chat [--save-on-exit]
 eddi --serve [--host H] [--port 8765]   JSON API: GET /health /stats, POST /ask
 eddi-gui                    Tkinter desktop app (train, chat, ingest, save)
@@ -197,8 +250,9 @@ python -m unittest discover -s tests -v     # 28 tests, cross-platform
 ```
 
 The suite covers hypervector algebra (bind/unbind, bundles, permutation), fuzzy knowledge
-lookup, analogy and multi-hop chaining, language-model normalisation/generalisation/persistence,
-question routing, math sandboxing, training + brain round-trip, and Windows-safe paths.
+lookup, analogy and multi-hop chaining, **writable rules / aliases / provenance with zero
+trained tokens**, language-model normalisation/generalisation/persistence, question routing,
+math sandboxing, training + brain round-trip, and Windows-safe paths.
 
 CI (`.github/workflows/ci.yml`) runs the tests plus a train/benchmark quality gate on
 **Ubuntu, Windows and macOS**. Releases (`.github/workflows/release.yml`) run the same tests
@@ -219,7 +273,8 @@ assets in a matrix (so the platform jobs never race on the same release) plus `s
                                    optional accelerator: src/eddi_core.cpp
 ```
 
-* **Memory is written, not trained.** One `teach` call is one fact, forever.
+* **Memory and inference are written, not trained.** One `teach` is one fact; one `rule` is
+  one inference rule; neither touches the language model (`trained_tokens` stays 0).
 * **Language is trained, not prompted.** No cloud, no API key, no GPU.
 * **Answers are traceable.** Every response carries a `kind` (`ask`, `about`, `chain`,
   `analogy`, `math`, `generate`, `unknown`) and optional reasoning details (`--explain`).

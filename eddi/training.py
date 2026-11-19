@@ -222,6 +222,10 @@ def save_brain(agent: EddiAgent, path: Optional[str] = None) -> str:
         "facts": [(s, r, o) for s, r, o, _hv in agent.kb.facts],
         "language_model": agent.lm.to_payload(),
         "transitions": dict(agent.transitions),
+        # writable intelligence that is NOT obtained by training
+        "rules": list(agent.kb.rules),
+        "aliases": dict(agent.kb.user_aliases),
+        "derived": sorted(agent.kb.derived),
     }
     with open(path, "wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -244,7 +248,16 @@ def load_brain(
         raise ValueError(f"Unsupported brain format {payload['format']!r} (expected {BRAIN_FORMAT})")
 
     agent = agent or EddiAgent(context_path=context_path, persist_context=persist_context)
-    agent.kb.import_facts(payload.get("facts", []))
+    direct = [f for f in payload.get("facts", []) if tuple(f) not in set(
+        tuple(d) for d in payload.get("derived", [])
+    )]
+    agent.kb.import_facts(direct)
+    for alias, canonical in payload.get("aliases", {}).items():
+        agent.kb.user_aliases[alias] = canonical
+    for premise, conclusion in payload.get("rules", []):
+        agent.kb.add_rule(premise, conclusion)
+    agent.kb.derived = {tuple(d) for d in payload.get("derived", [])}
+    agent.kb.apply_rules()
     from .language import NGramLanguageModel
 
     agent.lm = NGramLanguageModel.from_payload(payload["language_model"])

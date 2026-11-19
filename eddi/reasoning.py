@@ -143,6 +143,8 @@ class Reasoner:
 
         for handler in (
             self._handle_math,
+            self._handle_teach_rule,
+            self._handle_teach_alias,
             self._handle_teach,
             self._handle_chain,
             self._handle_analogy,
@@ -157,6 +159,35 @@ class Reasoner:
         return self._handle_generate(text)
 
     # ------------------------------------------------------------- knowledge
+    def _handle_teach_rule(self, text: str) -> Optional[Answer]:
+        match = re.match(r"^(?:rule|when)\s*[:\-]?\s*(.+?)\s*(?:=>|->|implies)\s*(.+?)[\.]*$",
+                         text, re.IGNORECASE)
+        if not match:
+            return None
+        premise, conclusion = (g.strip() for g in match.groups())
+        p, c = self.agent.teach_rule(premise, conclusion)
+        derived = len(self.agent.kb.derived)
+        return Answer(
+            f"Rule written: {p} => {c}  ({derived} fact(s) now derived, 0 training tokens)",
+            kind="rule",
+            confidence=1.0,
+            details=["writable inference: forward chaining over existing facts"],
+        )
+
+    def _handle_teach_alias(self, text: str) -> Optional[Answer]:
+        match = re.match(r"^(?:alias|also\s+called)\s*[:\-]?\s*(.+?)\s*(?:=|->|means|is)\s*(.+?)[\.]*$",
+                         text, re.IGNORECASE)
+        if not match:
+            return None
+        alias, canonical = (g.strip() for g in match.groups())
+        resolved = self.agent.teach_alias(alias, canonical)
+        return Answer(
+            f"Alias written: '{alias}' -> {resolved}",
+            kind="alias",
+            confidence=1.0,
+            details=["writable vocabulary: no retraining needed"],
+        )
+
     def _handle_teach(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:teach|learn|remember)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)
         if not match:
@@ -184,8 +215,9 @@ class Reasoner:
                     kind="help",
                 )
             s, r, o = parsed
-        self.agent.write_fact(s, r, o)
-        return Answer(f"Learned: ({s}) --{r}--> ({o})", kind="teach", confidence=1.0)
+        created = self.agent.teach(s, r, o)
+        extra = f" (+{created - 1} derived by rules)" if created > 1 else ""
+        return Answer(f"Learned: ({s}) --{r}--> ({o}){extra}", kind="teach", confidence=1.0)
 
     def _handle_ask(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:ask|query)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)
@@ -242,6 +274,12 @@ class Reasoner:
 
     def _answer_attribute(self, relation_text: str, subject_text: str) -> Answer:
         """Answer 'what is the <relation_text> of <subject_text>'."""
+        # A written alias may cover the whole object phrase ("the red planet").
+        aliased = self.agent.kb.resolve(subject_text)
+        if aliased and self.agent.kb.facts_about(aliased):
+            relation = self.agent.resolve_relation(relation_text)
+            if relation and self.agent.kb.query(aliased, relation):
+                return self._answer_relation(aliased, relation)
         # The whole phrase may itself be a known entity ("speed of light").
         phrase = self.agent.kb.resolve(f"{relation_text} of {subject_text}")
         if phrase and self.agent.kb.facts_about(phrase):
@@ -441,6 +479,8 @@ class Reasoner:
                 "  tell me about <subject>\n"
                 "  how is <a> related to <b>\n"
                 "  chain <start> | <rel1> | <rel2>\n"
+                "  rule <rel1> => <rel2>      (writable inference, no training)\n"
+                "  alias <phrase> = <canonical>\n"
                 "  <a> is to <b> as <c> is to ?\n"
                 "  2 + 2 * 10\n"
                 "  anything else -> language-model continuation",

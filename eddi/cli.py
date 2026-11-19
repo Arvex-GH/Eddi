@@ -145,6 +145,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         if args.explain and answer.details:
             for detail in answer.details:
                 print(f"  · {detail}")
+        if args.save:
+            save_brain(agent, args.brain)
     finally:
         agent.close()
     return 0
@@ -257,6 +259,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print benchmark as JSON")
     parser.add_argument("--explain", action="store_true", help="show where the answer came from")
     parser.add_argument("--save-on-exit", action="store_true", help="save the brain when chat exits")
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="save the brain after --ask (persists facts/rules/aliases written by your question)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser

@@ -148,6 +148,12 @@ class WritableKnowledgeBase:
         self._object_hvs: Dict[Tuple[str, str], List[HyperVector]] = {}
         self._superpos: Dict[Tuple[str, str], HyperVector] = {}
         self._alias: Dict[str, str] = {}
+        # writable inference: rules are (premise_relation, conclusion_relation)
+        self.rules: List[Tuple[str, str]] = []
+        # user-taught synonyms: alias -> canonical symbol
+        self.user_aliases: Dict[str, str] = {}
+        # facts produced by rules, for provenance / explanation
+        self.derived = set()
 
     # ------------------------------------------------------------------ symbols
     def get_or_create(self, name: str) -> HyperVector:
@@ -156,11 +162,22 @@ class WritableKnowledgeBase:
             self._alias.setdefault(normalise_symbol(name), name)
         return self.symbols[name]
 
+    def add_alias(self, alias: str, canonical: str) -> str:
+        """Teach a synonym without retraining: ``Mars`` ~ ``red planet``."""
+        target = self.resolve(canonical) or canonical
+        self.user_aliases[normalise_symbol(alias)] = target
+        self.user_aliases[alias.strip().lower()] = target
+        return target
+
     def resolve(self, name: str) -> Optional[str]:
-        """Resolve a human phrase to a stored symbol (exact, normalised, fuzzy)."""
+        """Resolve a human phrase to a stored symbol (alias, exact, normalised, fuzzy)."""
         if name in self.symbols:
             return name
         key = normalise_symbol(name)
+        if key in self.user_aliases:
+            return self.user_aliases[key]
+        if name.strip().lower() in self.user_aliases:
+            return self.user_aliases[name.strip().lower()]
         if key in self._alias:
             return self._alias[key]
         lowered = {s.lower(): s for s in self.symbols}
@@ -174,8 +191,13 @@ class WritableKnowledgeBase:
         return None
 
     # ------------------------------------------------------------------ writing
-    def write_fact(self, subject: str, relation: str, obj: str) -> HyperVector:
-        """Write a structured fact directly into hyperdimensional memory (no training)."""
+    def write_fact(self, subject: str, relation: str, obj: str) -> bool:
+        """Write a structured fact directly into hyperdimensional memory (no training).
+
+        Returns ``True`` when the fact is new (or its recency was refreshed) and
+        ``False`` when it was already stored - keeping writes idempotent so
+        forward-chained rules can safely re-derive facts.
+        """
         s_hv = self.get_or_create(subject)
         r_hv = self.get_or_create(relation)
         o_hv = self.get_or_create(obj)
@@ -188,14 +210,15 @@ class WritableKnowledgeBase:
             objects.append(obj)
             self._object_hvs[key].remove(o_hv)
             self._object_hvs[key].append(o_hv)
-        else:
-            objects.append(obj)
-            self._object_hvs.setdefault(key, []).append(o_hv)
-            self._by_s.setdefault(subject, []).append((relation, obj))
-            self._by_o.setdefault(obj, []).append((subject, relation))
-            self.facts.append((subject, relation, obj, bound))
+            self._superpos.pop(key, None)
+            return False
+        objects.append(obj)
+        self._object_hvs.setdefault(key, []).append(o_hv)
+        self._by_s.setdefault(subject, []).append((relation, obj))
+        self._by_o.setdefault(obj, []).append((subject, relation))
+        self.facts.append((subject, relation, obj, bound))
         self._superpos.pop(key, None)  # invalidate cached bundle
-        return bound
+        return True
 
     def import_facts(self, facts: Iterable[Tuple[str, str, str]]) -> int:
         count = 0
@@ -262,6 +285,89 @@ class WritableKnowledgeBase:
             if limit is not None and len(out) >= limit:
                 break
         return out
+
+    def add_rule(self, premise: str, conclusion: str) -> Tuple[str, str]:
+        """Write an inference rule: whenever ``X --premise--> Y`` holds, derive ``X --conclusion--> Y``.
+
+        This is how Eddi gains *reasoning* without training: the rule is a write.
+        """
+        p = self.resolve(premise) or normalise_symbol(premise)
+        c = self.resolve(conclusion) or normalise_symbol(conclusion)
+        if (p, c) not in self.rules:
+            self.rules.append((p, c))
+        self.apply_rules()
+        return p, c
+
+    def apply_rules(self, max_iterations: int = 64) -> int:
+        """Forward-chain every rule until no new fact can be derived.
+
+        Returns the number of *new* facts.  Derived facts are recorded in
+        ``derived`` so provenance stays inspectable via :meth:`explain`.
+
+        Inference follows the rule's **premise relation**, so it stays sound:
+
+        * ``is_a => is_a`` gives the transitive closure of an ``is_a``
+          hierarchy written by the user;
+        * ``is_a => warm_blooded`` copies warm-bloodedness up that hierarchy
+          (``cat --is_a--> mammal --is_a--> animal`` makes cat warm-blooded
+          *and* animal warm-blooded, because the rule says so - a ``plant``
+          never becomes warm-blooded because nothing in the written
+          ``is_a`` chain claims it);
+        * rules compose: facts derived by one rule in this pass are inputs to
+          the next pass.
+        """
+        created = 0
+        if not self.rules:
+            return 0
+        for _ in range(max_iterations):
+            additions: List[Tuple[str, str, str]] = []
+            for subject, relation, obj, _hv in list(self.facts):
+                for premise, conclusion in self.rules:
+                    if relation != premise:
+                        continue
+                    if premise == conclusion:
+                        # transitive closure of the premise relation: the
+                        # subject is related to every ancestor of the object
+                        frontier, seen = [obj], {obj}
+                        while frontier:
+                            current = frontier.pop()
+                            for next_obj in self._by_sr.get((current, premise), []):
+                                if next_obj not in seen:
+                                    seen.add(next_obj)
+                                    frontier.append(next_obj)
+                                    additions.append((subject, conclusion, next_obj))
+                    else:
+                        # the conclusion is inherited by the subject through
+                        # the premise edge it already has (one edge per pass,
+                        # so the next pass climbs to the following ancestor)
+                        additions.append((subject, conclusion, obj))
+            fresh = [
+                triple
+                for triple in dict.fromkeys(additions)
+                if triple[2] not in self._by_sr.get((triple[0], triple[1]), [])
+            ]
+            if not fresh:
+                break
+            for triple in fresh:
+                if self.write_fact(*triple):
+                    self.derived.add(triple)
+                    created += 1
+        return created
+
+    def explain(self, subject: str, relation: str, obj: str) -> Optional[str]:
+        """Explain how a fact was derived (or that it was written directly)."""
+        subject = self.resolve(subject) or subject
+        triple = (subject, relation, obj)
+        if triple not in self.derived:
+            return None
+        for premise, conclusion in self.rules:
+            if conclusion != relation:
+                continue
+            if self.query(subject, premise, top_k=256):
+                for candidate, _ in self.query(subject, premise, top_k=256):
+                    if candidate == obj:
+                        return f"{subject} --{premise}--> {obj}  (written rule: {premise} => {conclusion})"
+        return f"derived by rule ({relation})"
 
     def subjects(self) -> List[str]:
         return list(self._by_s)

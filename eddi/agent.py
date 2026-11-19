@@ -80,13 +80,29 @@ class EddiAgent:
         self.lm.train_text(text)
         return len(tokens)
 
-    def teach(self, subject: str, relation: str, obj: str) -> None:
+    def teach(self, subject: str, relation: str, obj: str) -> int:
+        """Write one fact. Any stored rule that matches is applied immediately.
+
+        Returns the number of facts this write caused (the fact itself plus any
+        facts derived by rules).
+        """
         self.kb.write_fact(subject, relation, obj)
+        return 1 + self.kb.apply_rules()
 
     write_fact = teach
 
     def teach_many(self, facts: Iterable[Tuple[str, str, str]]) -> int:
-        return self.kb.import_facts(facts)
+        count = self.kb.import_facts(facts)
+        self.kb.apply_rules()
+        return count
+
+    def teach_rule(self, premise: str, conclusion: str) -> Tuple[str, str]:
+        """Write an inference rule (no training): ``X --premise--> Y`` implies ``X --conclusion--> Y``."""
+        return self.kb.add_rule(premise, conclusion)
+
+    def teach_alias(self, alias: str, canonical: str) -> str:
+        """Write a synonym so Eddi understands a phrase it was never trained on."""
+        return self.kb.add_alias(alias, canonical)
 
     def ingest_file(self, path: str) -> int:
         from .pipeline import ingest_file
