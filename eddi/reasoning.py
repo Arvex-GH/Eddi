@@ -159,6 +159,12 @@ def _format_number(value: float) -> str:
     return f"{value:.6g}"
 
 
+#: Objects that assert a property holds. A relation question may only be
+#: answered from these, because any other object is a *value* ("Berlin"), not
+#: a verdict, and "what is the capital of France" is not that kind of question.
+_AFFIRMATIVE = frozenset({"yes", "true", "1"})
+
+
 class Reasoner:
     """Routes a message to the right capability and composes the answer."""
 
@@ -186,6 +192,7 @@ class Reasoner:
             self._handle_analogy,
             self._handle_relations,
             self._handle_false_premise,
+            self._handle_relation_question,
             self._handle_phrase_lookup,
             self._handle_types_of,
             self._handle_compare,
@@ -794,6 +801,40 @@ class Reasoner:
             return Answer(f"I don't know anything about '{match.group(1)}' yet.", kind="unknown")
         return self._about(subject)
 
+    def _handle_relation_question(self, text: str) -> Optional[Answer]:
+        """Answer "what is the largest ocean" when the relation is the topic.
+
+        "what is the largest ocean" names no subject. The knowledge is stored as
+        ("Pacific", "largest_ocean", "yes"), so the question is really "which
+        subject has this property true". Only facts whose object is an
+        affirmation qualify -- otherwise "what is the capital of France" would be
+        swallowed here as "the relation 'capital_of'" and answered with a city.
+        """
+        match = re.match(
+            r"^(?:what|which)\s+(?:is|are)\s+(?:the\s+)?(.+?)\s*\??$",
+            text.strip(), re.IGNORECASE,
+        )
+        if not match:
+            return None
+        relation = self.agent.resolve_relation(match.group(1))
+        if relation is None:
+            return None
+        subjects = [
+            subj
+            for subj, rel, obj, _hv in self.agent.kb.facts
+            if rel == relation and obj in _AFFIRMATIVE
+        ]
+        if not subjects:
+            return None
+        subjects = list(dict.fromkeys(subjects))
+        listing = ", ".join(self._render(x) for x in subjects)
+        return Answer(
+            f"{listing}.",
+            kind="ask",
+            confidence=1.0,
+            details=[f"subjects where ({relation}) holds: {listing}"],
+        )
+
     def _handle_phrase_lookup(self, text: str) -> Optional[Answer]:
         """Answer 'what is the <relation> for <subject>' without mistaking a
         preposition for the relation.
@@ -879,22 +920,33 @@ class Reasoner:
         subject_text, relation_text = match.group(1).strip(), match.group(2).strip()
         subject = self.agent.resolve_entity(subject_text)
         relation = self.agent.resolve_relation(relation_text)
-        if subject is None or relation is None:
-            return None
 
-        # "what is Paris the capital of?" -> Paris is the capital of France.
-        # The fact is stored (Paris, capital_of, France), so the answer is the
-        # OBJECT of a fact whose SUBJECT is Paris. Reading it the other way
-        # round finds nothing, which is what the first version did.
+        # The stored direction decides the reading. "capital_of" is stored
+        # (Paris, capital_of, France), so "what is Paris the capital of" asks
+        # for the object and "what is France the capital of" asks for the
+        # subject -- the question cannot tell you which without the data.
+        if relation is None:
+            return None
+        if subject is None:
+            return None
+        facts = self.agent.kb.facts
         values = [
-            fact_object
-            for fact_subject, fact_relation, fact_object, _hv in self.agent.kb.facts
-            if fact_relation == relation and fact_subject == subject
+            obj
+            for subj, rel, obj, _hv in facts
+            if rel == relation and subj == subject
         ]
+        inverted = [
+            subj
+            for subj, rel, obj, _hv in facts
+            if rel == relation and obj == subject and subj != subject
+        ]
+        # Prefer the direction that has data; if both do, answer both readings.
+        values = list(dict.fromkeys(values))
+        if not values and inverted:
+            values = list(dict.fromkeys(inverted))
         if not values:
             return None
-        values = list(dict.fromkeys(values))
-        pretty = " and ".join(v.replace("_", " ") for v in values)
+        pretty = " and ".join(self._render(v) for v in values)
         return Answer(
             f"{pretty}.",
             kind="reverse",

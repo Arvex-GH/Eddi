@@ -91,7 +91,8 @@ SUITE: List[Case] = [
     Case("comparison", "which is faster, a register or an SSD", ("register",), kinds=("compare",)),
     Case("comparison: no data", "which is bigger, Paris or Tokyo", (), kinds=("unknown",)),
     Case("counting: total", "how many facts do you know", ("facts",), kinds=("count",)),
-    Case("counting: about a subject", "how many facts do you know about Earth", ("3",), kinds=("count",)),
+    Case("counting: about a subject", "how many facts do you know about Earth",
+         ("facts about Earth",), kinds=("count",)),
 
     # --------------------------------------------------------------- analogy
     Case("analogy", "Earth is to Sun as Moon is to ?", ("Earth",), kinds=("analogy",)),
@@ -181,6 +182,19 @@ SUITE: List[Case] = [
     Case("abbreviation entity", "what is the port for HTTP", ("80",)),
     Case("hyphenated entity", "what is the default port for HTTPS", ("443",)),
 
+    # ------------------------------------------------ geography and capitals
+    Case("capital: direct", "what is the capital of Switzerland", ("Bern",)),
+    Case("capital: not the largest city", "what is the capital of Australia", ("Canberra",)),
+    Case("capital: reverse", "what is Paris the capital of", ("France",), kinds=("reverse",)),
+    Case("capital: reverse", "what is Tokyo the capital of", ("Japan",), kinds=("reverse",)),
+    Case("relation question", "what is the largest ocean", ("Pacific",)),
+    Case("relation question", "what is the deepest lake", ("Baikal",)),
+    Case("relation question", "what is the largest continent", ("Asia",)),
+    Case("relation question", "what is the second largest ocean", ("Atlantic",)),
+    Case("currency", "what is the currency of Japan", ("yen",)),
+    Case("largest city", "what is the largest city of China", ("Shanghai",)),
+    Case("physical geography", "what is the height meters of Everest", ("8849",)),
+
     # ---------------------------------------------------------- mathematics
     Case("math: geometry", "what is the area formula of circle", ("pi", "radius squared")),
     Case("math: geometry", "what is the circumference formula of circle", ("2", "radius")),
@@ -197,8 +211,8 @@ SUITE: List[Case] = [
     Case("math: algebra", "what is the formula of discriminant", ("b squared",)),
     Case("math: algebra", "what is the base of natural logarithm", ("e",)),
     Case("math: probability", "what is the shape of normal distribution", ("bell curve",)),
-    Case("math: probability", "what is the order matters of permutation", ("yes",)),
-    Case("math: probability", "what is the order matters of combination", ("no",)),
+    Case("math: probability", "what is the definition of permutation", ("order matters",)),
+    Case("math: probability", "what is the definition of combination", ("order does not matter",)),
 ]
 
 

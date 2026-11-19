@@ -172,8 +172,8 @@ FACTS: List[Fact] = [
     ("median", "resistant_to", "outliers"),
     ("mean", "sensitive_to", "outliers"),
     ("percentile", "meaning", "percentage_of_values_below"),
-    ("combination", "order_matters", "no"),
-    ("permutation", "order_matters", "yes"),
+    ("combination", "definition", "selection_where_order_does_not_matter"),
+    ("permutation", "definition", "arrangement_where_order_matters"),
     ("law_of_large_numbers", "statement", "sample_mean_approaches_expected_value"),
     ("central_limit_theorem", "statement", "sum_of_many_variables_is_approximately_normal"),
 ]

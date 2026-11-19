@@ -146,7 +146,6 @@ GEOGRAPHY_FACTS: List[Fact] = [
     ("France", "continent", "Europe"),
     ("Japan", "continent", "Asia"),
     ("Nile", "longest_river_in", "Africa"),
-    ("Everest", "highest_mountain_on", "Earth"),
     ("kilometer", "equals", "1000_meters"),
     ("hour", "equals", "60_minutes"),
     ("minute", "equals", "60_seconds"),
@@ -261,11 +260,16 @@ GEOGRAPHY_PROSE: List[str] = [
 
 # The teaching curriculum lives in eddi/curriculum_packs/, one module per
 # subject, so this file stays a registry rather than growing without bound.
+from .curriculum_packs import geography_world as _geography_world
 from .curriculum_packs import mathematics as _mathematics
 
 PACKS: Dict[str, Dict[str, List]] = {
     "core": {"facts": CORE_FACTS, "prose": CORE_PROSE},
     "mathematics": {"facts": _mathematics.FACTS, "prose": _mathematics.PROSE},
+    "geography_world": {
+        "facts": _geography_world.FACTS,
+        "prose": _geography_world.PROSE,
+    },
     "science": {"facts": SCIENCE_FACTS, "prose": SCIENCE_PROSE},
     "computing": {"facts": COMPUTING_FACTS, "prose": COMPUTING_PROSE},
     "reasoning": {"facts": REASONING_FACTS, "prose": REASONING_PROSE},
