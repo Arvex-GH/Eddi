@@ -244,15 +244,28 @@ class EddiAgent:
         resolved = kb.resolve(text)
         if resolved is not None:
             return resolved
-        # try each token run against known symbols
+        # Try each token run against known symbols, longest first, and prefer a
+        # run that keeps the *whole* phrase. "the Elements" used to match the
+        # bare symbol "element" by dropping a leading word, so a question about
+        # Euclid's book was answered from a geometry fact about elements.
         words = text.split()
+        best = None
+        best_size = 0
         for size in range(len(words), 0, -1):
             for start in range(0, len(words) - size + 1):
                 candidate = " ".join(words[start : start + size])
                 resolved = kb.resolve(candidate)
-                if resolved is not None:
+                if resolved is None:
+                    continue
+                # A complete-phrase match always wins. Otherwise take the
+                # longest run, and only then the earliest one.
+                if resolved in kb.symbols and candidate.lower() in {
+                    resolved.lower(), resolved.replace("_", " ").lower()
+                }:
                     return resolved
-        return None
+                if size > best_size:
+                    best, best_size = resolved, size
+        return best
 
     def resolve_relation(self, text: str) -> Optional[str]:
         """Map a phrase like 'the speed of light' to a stored relation key."""

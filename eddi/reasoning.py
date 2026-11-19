@@ -192,6 +192,8 @@ class Reasoner:
             self._handle_analogy,
             self._handle_relations,
             self._handle_false_premise,
+            self._handle_who_verb,
+            self._handle_when,
             self._handle_relation_question,
             self._handle_phrase_lookup,
             self._handle_types_of,
@@ -800,6 +802,127 @@ class Reasoner:
         if subject is None:
             return Answer(f"I don't know anything about '{match.group(1)}' yet.", kind="unknown")
         return self._about(subject)
+
+    #: "who invented the printing press" -> the fact is (printing_press,
+    #: invented_by, Gutenberg). The verb reverses subject and object, so these
+    #: need their own path; no subject-first handler can reach them.
+    _WHO_VERB_Q = re.compile(
+        # "the" is part of the captured name, not noise to discard: "the
+        # Elements" is a book title and stripping the article turned it into
+        # the bare symbol "element". resolve_entity copes with a stray article.
+        r"^who\s+(invented|discovered|wrote|composed|painted|founded|created|"
+        r"built|designed|developed|proposed|led|ruled)\s+(.+?)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    #: English past tense to the relation a fact would be stored under. The
+    #: curriculum writes "invented_by", "discovered_by", "wrote" and so on, so
+    #: the verb has to be translated, not merely reversed.
+    _VERB_TO_RELATION = {
+        "invented": ("invented_by", "inventor"),
+        "discovered": ("discovered_by", "discoverer"),
+        "wrote": ("wrote", "written_by", "author"),
+        "composed": ("composed_by", "composer"),
+        "painted": ("painted_by", "painter"),
+        "founded": ("founded_by", "founder"),
+        "created": ("created_by", "creator"),
+        "built": ("built_by", "builder"),
+        "designed": ("designed_by", "designer"),
+        "developed": ("developed_by", "developer"),
+        "proposed": ("proposed_by", "proposer"),
+        "led": ("led_by", "leader"),
+        "ruled": ("ruled", "ruler"),
+    }
+
+    def _handle_who_verb(self, text: str) -> Optional[Answer]:
+        """Answer "who invented the printing press"."""
+        match = self._WHO_VERB_Q.match(text.strip())
+        if not match:
+            return None
+        verb = match.group(1).lower()
+        thing_text = match.group(2).strip()
+        thing = self.agent.resolve_entity(thing_text)
+        if thing is None:
+            return None
+        candidates = self._VERB_TO_RELATION.get(verb, ())
+        facts = self.agent.kb.facts
+        for relation in candidates:
+            values = [
+                obj
+                for subj, rel, obj, _hv in facts
+                if subj == thing and rel == relation
+            ]
+            if not values:
+                # The fact may be stored the other way round: "who wrote the
+                # Elements" is (Euclid, wrote, the_Elements), where the person
+                # is the subject.
+                values = [
+                    subj
+                    for subj, rel, obj, _hv in facts
+                    if rel == relation and obj == thing
+                ]
+            if values:
+                values = list(dict.fromkeys(values))
+                listing = " and ".join(self._render(v) for v in values)
+                return Answer(
+                    f"{listing}.",
+                    kind="ask",
+                    confidence=1.0,
+                    details=[f"({thing}, {relation}) -> {listing}"],
+                )
+        return None
+
+    #: "when was the printing press invented" -> (printing_press,
+    #: invented_year, 1440). The year lives under a relation derived from the
+    #: verb, so the question has to be mapped rather than looked up directly.
+    _WHEN_Q = re.compile(
+        r"^when\s+(?:was|were|did)\s+(.+?)\s+"
+        r"(invented|discovered|built|founded|written|published|born|signed|"
+        r"completed|created|established)\s*\??$",
+        re.IGNORECASE,
+    )
+
+    _VERB_TO_YEAR_RELATION = {
+        "invented": ("invented_year", "year"),
+        "discovered": ("discovered_year", "year"),
+        "built": ("built_year", "built_year_BCE", "year"),
+        "founded": ("founded_year", "founded_year_BCE", "year"),
+        "written": ("written_year", "year"),
+        "published": ("published_year", "published_year_BCE", "year"),
+        "signed": ("signed_year", "year"),
+        "completed": ("completed_year", "year"),
+        "created": ("created_year", "year"),
+        "established": ("established_year", "year"),
+        "born": ("born_year", "born_year_BCE", "year"),
+    }
+
+    def _handle_when(self, text: str) -> Optional[Answer]:
+        """Answer "when was the printing press invented"."""
+        match = self._WHEN_Q.match(text.strip())
+        if not match:
+            return None
+        thing_text, verb = match.group(1).strip(), match.group(2).lower()
+        thing = self.agent.resolve_entity(thing_text)
+        if thing is None:
+            return None
+        for relation in self._VERB_TO_YEAR_RELATION.get(verb, ()):  # type: ignore[arg-type]
+            values = [
+                obj
+                for subj, rel, obj, _hv in self.agent.kb.facts
+                if subj == thing and rel == relation
+            ]
+            if values:
+                values = list(dict.fromkeys(values))
+                listing = " and ".join(self._render(v) for v in values)
+                label = "BCE" if relation.endswith("BCE") else ""
+                text_out = f"{listing} {label}".strip()
+                return Answer(
+                    f"{text_out}.",
+                    kind="ask",
+                    confidence=1.0,
+                    details=[f"({thing}, {relation}) -> {listing}"],
+                )
+        return None
 
     def _handle_relation_question(self, text: str) -> Optional[Answer]:
         """Answer "what is the largest ocean" when the relation is the topic.

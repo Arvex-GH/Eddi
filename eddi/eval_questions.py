@@ -195,6 +195,16 @@ SUITE: List[Case] = [
     Case("largest city", "what is the largest city of China", ("Shanghai",)),
     Case("physical geography", "what is the height meters of Everest", ("8849",)),
 
+    # ---------------------------------------------------------------- history
+    Case("history: date", "what is the invented year of printing press", ("1440",)),
+    Case("history: date", "what is the reached americas year of Columbus", ("1492",)),
+    Case("history: date BCE", "what is the built year BCE of pyramid of Giza", ("2560",)),
+    Case("history: who invented", "who invented the printing press", ("Gutenberg",)),
+    Case("history: who wrote", "who wrote the Elements", ("Euclid",)),
+    Case("history: when", "when was the printing press invented", ("1440",)),
+    Case("history: when", "when was the Magna Carta signed", ("1215",)),
+    Case("history: lineage", "what is the taught of Socrates", ("Plato",)),
+
     # ---------------------------------------------------------------- science
     Case("science: chemistry", "what is the atomic number of gold", ("79",)),
     Case("science: chemistry", "what is the chemical symbol of iron", ("Fe",)),
