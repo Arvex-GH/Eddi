@@ -535,6 +535,11 @@ class EddiHandler(BaseHTTPRequestHandler):
             # requests are in flight; the agent is not thread-safe.
             with self.server.lock:  # type: ignore[attr-defined]
                 answer = self.agent.answer(text)
+            # /ask is not read-only: "teach X | r | o" and "I am 16 years old"
+            # both write facts, so a taught fact sent through chat would be lost
+            # on restart if this were skipped.
+            if answer.kind in ("teach", "remember"):
+                self._maybe_save()
             self._json(
                 {
                     "text": answer.text,

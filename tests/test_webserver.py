@@ -283,6 +283,47 @@ class TestHonesty(unittest.TestCase):
                 answer = self.agent.answer(text)
                 self.assertIn(answer.kind, {"about", "ask"})
 
+    def test_first_person_statement_is_remembered_not_queried(self):
+        # "I am 16 years old" is information, not a question. It used to be
+        # treated as a lookup for the word "years" and refused.
+        answer = self.agent.answer("I am 16 years old")
+        self.assertEqual(answer.kind, "remember")
+        self.assertIn("16", answer.text)
+
+    def test_remembered_facts_can_be_asked_back(self):
+        cases = {
+            "I am 16 years old": ("how old am I?", "16"),
+            "my name is Alex": ("what is my name?", "Alex"),
+            "I live in Frankfurt": ("where do I live?", "Frankfurt"),
+            "I like pizza": ("what do I like?", "pizza"),
+            "I am a student": ("what is my job?", "student"),
+            "my favourite colour is blue": ("what is my favourite colour?", "blue"),
+        }
+        for told, (asked, expected) in cases.items():
+            with self.subTest(told=told):
+                self.assertEqual(self.agent.answer(told).kind, "remember")
+                answer = self.agent.answer(asked)
+                self.assertEqual(answer.kind, "about_self")
+                self.assertIn(expected, answer.text)
+
+    def test_repeating_a_fact_does_not_duplicate_it(self):
+        self.agent.answer("I am 16 years old")
+        before = len(self.agent.kb)
+        second = self.agent.answer("I am 16 years old")
+        self.assertEqual(second.kind, "remember")
+        self.assertIn("already knew", second.text)
+        self.assertEqual(len(self.agent.kb), before, "duplicate fact was written")
+
+    def test_unknown_self_fact_is_admitted(self):
+        answer = self.agent.answer("what is my favourite food?")
+        self.assertEqual(answer.kind, "unknown")
+        self.assertIn("don't know", answer.text.lower())
+
+    def test_statements_do_not_break_normal_questions(self):
+        self.agent.answer("I am 16 years old")
+        self.assertEqual(self.agent.answer("tell me about water").kind, "about")
+        self.assertEqual(self.agent.answer("what is 12 * 37?").kind, "math")
+
     def test_refusal_does_not_prescribe_cli_syntax(self):
         # Browser users cannot type shell commands; the UI offers a form.
         answer = self.agent.answer("tell me about an unladen swallow")

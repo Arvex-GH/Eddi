@@ -148,6 +148,8 @@ class Reasoner:
             self._handle_teach_rule,
             self._handle_teach_alias,
             self._handle_teach,
+            self._handle_tell_about_self,
+            self._handle_ask_about_self,
             self._handle_chain,
             self._handle_analogy,
             self._handle_relations,
@@ -254,6 +256,140 @@ class Reasoner:
         created = self.agent.teach(s, r, o)
         extra = f" (+{created - 1} derived by rules)" if created > 1 else ""
         return Answer(f"Learned: ({s}) --{r}--> ({o}){extra}", kind="teach", confidence=1.0)
+
+    # The user has a stable identity in memory, so first-person statements are
+    # knowledge, not questions. Eddi previously treated "I am 16 years old" as a
+    # lookup for the word "years" and answered "I don't know".
+    USER_SUBJECT = "user"
+
+    # Told-back phrasing, not bare nouns: "you live in Frankfurt" reads like
+    # English, "your lives in is Frankfurt" does not.
+    _RELATION_LABEL = {
+        "age": ("your age is", "your age"),
+        "name": ("your name is", "your name"),
+        "occupation": ("your job is", "your job"),
+        "lives_in": ("you live in", "where you live"),
+        "likes": ("you like", "what you like"),
+        "work": ("you work as", "your work"),
+    }
+
+    _SELF_TELL = [
+        # "I am 16 years old"            -> age
+        (re.compile(r"^\s*i\s*am\s+(\d+)\s*(?:years?|yrs?)\s*old\s*[.!]?\s*$", re.I), "age"),
+        # "I am a student" / "I'm an engineer"
+        (re.compile(r"^\s*i\s*(?:'m|\s+am)\s+(?:a|an)\s+(.+?)\s*[.!]?\s*$", re.I), "occupation"),
+        # "I live in Frankfurt"
+        (re.compile(r"^\s*i\s+live\s+in\s+(.+?)\s*[.!]?\s*$", re.I), "lives_in"),
+        # "I like pizza" / "I love Rust"
+        (re.compile(r"^\s*i\s+(?:like|love|enjoy|prefer)\s+(.+?)\s*[.!]?\s*$", re.I), "likes"),
+        # "I work as a nurse" / "I work at Acme"
+        (re.compile(r"^\s*i\s+work\s+(?:as|at)\s+(?:a\s+|an\s+)?(.+?)\s*[.!]?\s*$", re.I), "work"),
+        # "my name is Alex" / "my favourite colour is blue"
+        (re.compile(r"^\s*my\s+name\s+is\s+(.+?)\s*[.!]?\s*$", re.I), "name"),
+        (re.compile(r"^\s*my\s+favou?rite\s+(\w+)\s+is\s+(.+?)\s*[.!]?\s*$", re.I), None),
+        # "I am Alex" (bare, no article) - name, only if it looks like a name
+        (re.compile(r"^\s*[Ii]\s*(?:'m|\s+am)\s+([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*)?)\s*[.!]?\s*$"), "name"),
+    ]
+
+    def _handle_tell_about_self(self, text: str) -> Optional[Answer]:
+        """Remember a fact the user states about themselves.
+
+        Statements, not questions: "I am 16 years old" is something to keep, and
+        answering it with a knowledge lookup was a category error.
+        """
+        for pattern, relation in self._SELF_TELL:
+            match = pattern.match(text)
+            if not match:
+                continue
+            if relation is None:
+                # "my favourite colour is blue" -> favourite_colour
+                relation = "favourite_" + match.group(1).lower()
+                obj = match.group(2)
+                label = "your favourite " + match.group(1).lower() + " is"
+            else:
+                obj = match.group(1)
+                told, _ = self._RELATION_LABEL.get(
+                    relation, (f"your {relation.replace('_', ' ')} is", relation)
+                )
+                label = told
+            obj = obj.strip(" .!")
+            if not obj:
+                continue
+            # Speaking a fact twice should not duplicate it.
+            existing = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, relation)]
+            if any(obj.lower() == e.lower() for e in existing):
+                return Answer(
+                    f"I already knew that {label} {obj}.",
+                    kind="remember",
+                    confidence=1.0,
+                )
+            self.agent.teach(self.USER_SUBJECT, relation, obj)
+            return Answer(
+                f"Got it - I'll remember that {label} {obj}.",
+                kind="remember",
+                confidence=1.0,
+                details=[f"memory: ({self.USER_SUBJECT}, {relation}, {obj})"],
+            )
+        return None
+
+    _SELF_ASK = [
+        (re.compile(r"\bhow\s+old\s+am\s+i\b|\bwhat(?:'s|\s+is)\s+my\s+age\b", re.I), "age"),
+        (re.compile(r"\bwhat(?:'s|\s+is)\s+my\s+name\b|\bwho\s+am\s+i\b", re.I), "name"),
+        (re.compile(r"\bwhere\s+do\s+i\s+live\b", re.I), "lives_in"),
+        (re.compile(r"\bwhat\s+do\s+i\s+do\b|\bwhat(?:'s|\s+is)\s+my\s+(?:job|occupation)\b", re.I), "occupation"),
+        (re.compile(r"\bwhat\s+do\s+i\s+like\b", re.I), "likes"),
+        # "what is my favourite colour" -> favourite_colour
+        (re.compile(r"\bwhat(?:'s|\s+is)\s+my\s+favou?rite\s+(\w+)\b", re.I), "favourite_*"),
+    ]
+
+    # How to say each fact back to the user.
+    _ANSWER_PHRASE = {
+        "age": lambda v: f"You're {v}.",
+        "name": lambda v: f"Your name is {v}.",
+        "lives_in": lambda v: f"You live in {v}.",
+        "occupation": lambda v: f"You're a {v}.",
+        "likes": lambda v: f"You like {v}.",
+        "work": lambda v: f"You work as {v}.",
+    }
+
+    def _handle_ask_about_self(self, text: str) -> Optional[Answer]:
+        """Answer questions about the user from the facts they told Eddi.
+
+        Remembering would be pointless if it could not be recalled, so this is
+        the other half of _handle_tell_about_self.
+        """
+        for pattern, relation in self._SELF_ASK:
+            match = pattern.search(text)
+            if not match:
+                continue
+            if relation == "favourite_*":
+                thing = match.group(1).lower()
+                relation = "favourite_" + thing
+                unknown_msg = f"I don't know your favourite {thing} yet - tell me and I'll remember."
+                answer_phrase = lambda v, _t=thing: f"Your favourite {_t} is {v}."
+            else:
+                _, topic = self._RELATION_LABEL.get(
+                    relation, ("", f"your {relation.replace('_', ' ')}")
+                )
+                unknown_msg = f"I don't know {topic} yet - tell me and I'll remember."
+                answer_phrase = self._ANSWER_PHRASE.get(
+                    relation, lambda v: f"Your {relation.replace('_', ' ')} is {v}."
+                )
+
+            hits = [o for o, _ in self.agent.kb.query(self.USER_SUBJECT, relation)]
+            if not hits:
+                return Answer(
+                    unknown_msg,
+                    kind="unknown",
+                    details=[f"no fact stored for ({self.USER_SUBJECT}, {relation})"],
+                )
+            return Answer(
+                answer_phrase(hits[0]),
+                kind="about_self",
+                confidence=1.0,
+                details=[f"memory: ({self.USER_SUBJECT}, {relation})"],
+            )
+        return None
 
     def _handle_ask(self, text: str) -> Optional[Answer]:
         match = re.match(r"^(?:ask|query)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)
