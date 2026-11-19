@@ -240,6 +240,24 @@ class Reasoner:
         # becomes a question, so it is filed as one and can never be recalled.
         return bool(self._QUESTION_MARKERS.match(stripped))
 
+    #: Symbols that are notation, not words. Replacing their underscores with
+    #: spaces turns a correct answer into noise ("O of n log n"), so they pass
+    #: through untouched.
+    _NOTATION = frozenset({"O_of_1", "O_of_log_n", "O_of_n", "O_of_n_log_n", "O_of_n_squared"})
+
+    @classmethod
+    def _render(cls, value: str) -> str:
+        """Storage-safe text shown to a human.
+
+        Facts are written with underscores so a value survives tokenisation as a
+        single symbol ("19.3_g_per_cm3", "no_gpu"). Those underscores are an
+        encoding detail and must not reach the answer: the user asked for a
+        density, not for a symbol name.
+        """
+        if value in cls._NOTATION:
+            return value
+        return value.replace("_", " ")
+
     def _handle_memory(self, text: str) -> Optional[Answer]:
         """Answer from verbatim stored text when it matches well enough.
 
@@ -755,9 +773,9 @@ class Reasoner:
         facts = self.agent.kb.facts_about(subject)
         if not facts:
             return Answer(f"I don't know anything about '{subject}' yet.", kind="unknown")
-        lines = [f"{subject}:"]
+        lines = [f"{self._render(subject)}:"]
         for relation, obj, _conf in facts[:12]:
-            lines.append(f"  {relation}: {obj}")
+            lines.append(f"  {self._render(relation)}: {self._render(obj)}")
         return Answer("\n".join(lines), kind="about", confidence=1.0)
 
     def _handle_about(self, text: str) -> Optional[Answer]:
@@ -805,7 +823,7 @@ class Reasoner:
         if not hits:
             return None
         return Answer(
-            f"{hits[0][0]}",
+            f"{self._render(hits[0][0])}",
             kind="ask",
             confidence=1.0,
             details=[f"memory: ({subject}, {relation}) -> {hits[0][0]}"],
@@ -979,7 +997,7 @@ class Reasoner:
         for relation, obj, _conf in facts:
             if relation == "name":
                 continue
-            lines.append(f"  {relation.replace('_', ' ')}: {obj.replace('_', ' ')}")
+            lines.append(f"  {self._render(relation)}: {self._render(obj)}")
         return Answer(
             "\n".join(lines),
             kind="identity",

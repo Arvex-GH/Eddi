@@ -61,10 +61,10 @@ SUITE: List[Case] = [
     Case("recall: created_by", "who discovered gravity", ("Newton",)),
     Case("recall: type", "what type of language is Rust", ("memory_safe",)),
     Case("recall: type", "what type of language is Python", ("interpreted",)),
-    Case("recall: definition", "what is a compiler", ("translate", "machine_code")),
+    Case("recall: definition", "what is a compiler", ("translate", "machine code")),
     Case("recall: definition", "what is an interpreter", ("execute",)),
-    Case("recall: definition", "what is an algorithm", ("finite_steps",)),
-    Case("recall: definition", "what is perplexity", ("exponential", "cross_entropy")),
+    Case("recall: definition", "what is an algorithm", ("finite steps",)),
+    Case("recall: definition", "what is perplexity", ("exponential", "cross entropy")),
 
     # -------------------------------------------------------------- taxonomy
     Case("taxonomy: orbits", "which planet does the Moon orbit", ("Earth",)),
@@ -170,14 +170,14 @@ SUITE: List[Case] = [
     Case("teaching: use what was taught", "what colour is zorblax", ("ultraviolet",)),
     Case("teaching: alias", "alias USA = United_States", ("USA",), kinds=("alias",)),
     Case("teaching: rule", "rule capital_of => located_in", ("capital_of",), kinds=("rule",)),
-    Case("teaching: derived fact usable", "where is Paris", ("located_in",)),
+    Case("teaching: derived fact usable", "where is Paris", ("located in",)),
 
     # ---------------------------------------------------- more distinct angles
     Case("multi-fact aggregation", "tell me about Earth", ("planet", "gravity")),
     Case("relation direction", "what is the gravity of Earth", ("9.81",)),
     Case("nested phrase entity", "what is the speed of light", ("299792458",)),
     Case("spelled-out number", "what is 2 to the power of 10", ("1024",), kinds=("math",)),
-    Case("query with article", "what is the shape of DNA", ("double_helix",)),
+    Case("query with article", "what is the shape of DNA", ("double helix",)),
     Case("abbreviation entity", "what is the port for HTTP", ("80",)),
     Case("hyphenated entity", "what is the default port for HTTPS", ("443",)),
 ]
@@ -192,7 +192,10 @@ def build_agent() -> EddiAgent:
     it made the first run of this suite report failures that were the fixture's
     fault, not the agent's.
     """
-    agent = EddiAgent(persist_context=False)
+    # No memory file: an evaluation must see only what it was given. Using the
+    # live store made the suite non-deterministic -- the agent's own earlier
+    # turns answered questions that were supposed to be answered from facts.
+    agent = EddiAgent(persist_context=False, memory_path="", record_turns=False)
     # All five packs: the live brain is trained with geography too, and leaving
     # it out made every capital/continent question look like a failure.
     for pack in ("core", "science", "computing", "reasoning", "geography"):
