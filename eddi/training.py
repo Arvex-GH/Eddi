@@ -165,7 +165,17 @@ def train(
 ) -> TrainingReport:
     """Train (or continue training) an agent and return a measurable report."""
     cfg = config or TrainingConfig()
-    agent = agent or EddiAgent(lm_order=cfg.order, persist_context=False)
+    if agent is None:
+        # Without a memory path the verbatim store is in-memory only, so every
+        # training sentence was thrown away when the process exited: the brain
+        # kept the n-gram counts and lost the text they came from. The agent
+        # could then generate a sentence but never quote it, which is why
+        # questions about the corpus fell through to a guess.
+        agent = EddiAgent(
+            lm_order=cfg.order,
+            persist_context=False,
+            memory_path=default_memory_path(),
+        )
     emit = log or (print if verbose else (lambda *_: None))
 
     if cfg.evaluate:

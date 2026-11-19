@@ -641,3 +641,31 @@ class TestRetrievalPrefersTheQuestion(unittest.TestCase):
             self.assertNotIn("logarithm", reply.text)
         finally:
             agent.close(save=False)
+
+class TestTrainingPersistsItsText(unittest.TestCase):
+    """Training must leave behind the sentences it learned from."""
+
+    def test_a_trained_brain_can_quote_its_corpus(self):
+        import tempfile
+        from eddi.training import train, TrainingConfig, load_brain
+
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = os.path.join(tmp, "b.pkl")
+            memory = os.path.join(tmp, "m.jsonl")
+            agent = EddiAgent(lm_order=3, persist_context=False,
+                              memory_path=memory)
+            config = TrainingConfig(packs=("core",), epochs=1, order=3,
+                                    evaluate=False, save_path=brain)
+            train(agent, config)
+            agent.close(save=False)
+
+            # The memory file is the only place the sentences live outside the
+            # process. Without it, a trained brain can generate a sentence but
+            # cannot quote one -- and every question about the corpus falls
+            # through to a guess.
+            loaded = load_brain(brain)
+            try:
+                self.assertGreater(len(loaded.memory.chunks), 0)
+                self.assertGreater(len(loaded.lm.trained_sentences), 0)
+            finally:
+                loaded.close(save=False)

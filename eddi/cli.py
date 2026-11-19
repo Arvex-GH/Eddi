@@ -20,7 +20,7 @@ from typing import List, Optional
 
 from . import __version__, curriculum, evaluation
 from .agent import EddiAgent
-from .paths import default_brain_path, find_core_binary
+from .paths import default_brain_path, default_memory_path, find_core_binary
 from .language import tokenize
 from .training import (
     TrainingConfig,
@@ -126,7 +126,15 @@ def cmd_train(args: argparse.Namespace) -> int:
         save_path=args.brain or default_brain_path(),
         max_corpus_tokens=args.max_tokens,
     )
-    agent = EddiAgent(lm_order=order, persist_context=False)
+    # The memory path must be set here, not left to the default: without it the
+    # verbatim store lives only in memory, so every training sentence was lost
+    # when the process exited. The brain kept the n-gram counts and discarded
+    # the text behind them.
+    agent = EddiAgent(
+        lm_order=order,
+        persist_context=False,
+        memory_path=default_memory_path(),
+    )
     try:
         report = train(agent, config, verbose=True)
         print()

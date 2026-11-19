@@ -287,7 +287,10 @@ class Reasoner:
                 confidence=1.0,
                 details=["written to verbatim memory"],
             )
-        hits = memory.search(text, k=5)
+        # Exclude earlier questions at the source. They match a new question
+        # word for word, they answer nothing, and by filling the candidate list
+        # they can crowd out the sentence that does answer it.
+        hits = memory.search(text, k=5, exclude_sources=("question", "reply-question"))
         if not hits:
             return None
 
@@ -365,6 +368,20 @@ class Reasoner:
                 best, best_key, best_cover = hit, key, coverage
         if best is None:
             best, best_cover = fallback, fallback_cover
+        # The subject term, as retrieval identified it, names what the question
+        # is about.
+        subject = next((h.subject for h in hits if h.subject), "")
+        if best is None and subject:
+            # Nothing matched the whole question. The subject alone is still a
+            # question worth answering: "how does a vaccine work" matches no
+            # sentence containing "work", yet the store has a sentence about
+            # what a vaccine does. Asking again with only the subject finds it,
+            # where the full query found nothing but unrelated "works".
+            for retry in memory.search(subject, k=5):
+                if _is_question(retry.chunk) or retry.missing_subject:
+                    continue
+                best, best_cover = retry, 0.5
+                break
         if best is None or best_cover < 0.34:
             return None
         # A question that the fact base could answer is handled earlier; by the
