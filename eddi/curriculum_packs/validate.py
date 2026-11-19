@@ -66,6 +66,31 @@ def check_prose(prose: Iterable[str], name: str = "pack") -> List[str]:
     return problems
 
 
+def check_case_duplicates(packs: Dict[str, Sequence[Fact]]) -> List[str]:
+    """One name must not exist in two spellings.
+
+    The knowledge base keys on the exact symbol, so "DNA" and "dna" are two
+    different entities: a fact taught to one is invisible to the other. That
+    split is silent -- both look correct in the source -- and it cost a real
+    benchmark failure, where "what is the shape of dna" could not see the
+    (DNA, shape, double_helix) fact.
+    """
+    spellings: Dict[str, Dict[str, List[str]]] = {}
+    for pack, facts in packs.items():
+        for subject, _relation, obj in facts:
+            for value in (subject, obj):
+                spellings.setdefault(value.lower(), {}).setdefault(value, []).append(pack)
+    problems: List[str] = []
+    for lowered, variants in spellings.items():
+        if len(variants) > 1:
+            described = ", ".join(f"{v!r}" for v in sorted(variants))
+            problems.append(
+                f"{lowered!r} exists as {described}; the knowledge base treats "
+                f"these as different entities"
+            )
+    return problems
+
+
 def check_pack(facts: Sequence[Fact], prose: Sequence[str], name: str) -> List[str]:
     return check_facts(facts, name) + check_prose(prose, name)
 
@@ -86,6 +111,12 @@ def validate_all() -> int:
         print(f"  {pack_name:22} {len(facts):5} facts  {len(prose):4} prose   {status}")
         for problem in problems[:20]:
             print(f"      - {problem}")
+    clashes = check_case_duplicates({name: pack.get("facts", []) for name, pack in PACKS.items()})
+    if clashes:
+        print(f"\n  {len(clashes)} name(s) spelled two ways across packs:")
+        for clash in clashes:
+            print(f"      - {clash}")
+        total_problems += len(clashes)
     print(f"\n  {total_facts} facts across {len(PACKS)} packs, {total_problems} problem(s)")
     return 1 if total_problems else 0
 

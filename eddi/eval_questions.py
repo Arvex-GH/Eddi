@@ -195,6 +195,24 @@ SUITE: List[Case] = [
     Case("largest city", "what is the largest city of China", ("Shanghai",)),
     Case("physical geography", "what is the height meters of Everest", ("8849",)),
 
+    # ---------------------------------------------------------------- science
+    Case("science: chemistry", "what is the atomic number of gold", ("79",)),
+    Case("science: chemistry", "what is the chemical symbol of iron", ("Fe",)),
+    Case("science: physics", "what is the si unit of force", ("newton",)),
+    Case("science: physics", "what is the formula of ohms law", ("voltage", "current")),
+    Case("science: physics", "what is the formula of kinetic energy", ("half",)),
+    Case("science: astronomy", "what is the largest planet", ("Jupiter",)),
+    Case("science: astronomy", "what is the hottest planet", ("Venus",)),
+    Case("science: astronomy", "what is the order from sun of earth", ("3",)),
+    Case("science: astronomy", "what is the atomic number of oxygen", ("8",)),
+    Case("science: biology", "what is the function of mitochondria", ("produce",)),
+    Case("science: biology", "what is the number in human of chromosome", ("46",)),
+    Case("science: biology", "what is the mechanism of evolution", ("natural selection",)),
+    Case("science: earth", "what is the cause of the seasons", ("axial tilt",)),
+    Case("science: earth", "what is the atmosphere main of Earth", ("nitrogen",)),
+    Case("counting: quantified relation", "how many planets does the solar system have", ("8",), kinds=("count",)),
+    Case("counting: quantified relation", "how many countries does Africa have", ("54",), kinds=("count",)),
+
     # ---------------------------------------------------------- mathematics
     Case("math: geometry", "what is the area formula of circle", ("pi", "radius squared")),
     Case("math: geometry", "what is the circumference formula of circle", ("2", "radius")),

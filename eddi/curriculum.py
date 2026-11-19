@@ -262,10 +262,12 @@ GEOGRAPHY_PROSE: List[str] = [
 # subject, so this file stays a registry rather than growing without bound.
 from .curriculum_packs import geography_world as _geography_world
 from .curriculum_packs import mathematics as _mathematics
+from .curriculum_packs import science_deep as _science_deep
 
 PACKS: Dict[str, Dict[str, List]] = {
     "core": {"facts": CORE_FACTS, "prose": CORE_PROSE},
     "mathematics": {"facts": _mathematics.FACTS, "prose": _mathematics.PROSE},
+    "science_deep": {"facts": _science_deep.FACTS, "prose": _science_deep.PROSE},
     "geography_world": {
         "facts": _geography_world.FACTS,
         "prose": _geography_world.PROSE,

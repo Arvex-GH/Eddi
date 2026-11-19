@@ -816,6 +816,12 @@ class Reasoner:
         )
         if not match:
             return None
+        # "<relation> of <subject>" is a *lookup*, not a relation question. It
+        # must reach _answer_attribute, which knows the subject. Claiming it
+        # here answered "what is the atomic number of gold" with "hydrogen",
+        # the subject of whichever fact happened to be scanned first.
+        if re.search(r"\b(?:of|for)\b", match.group(1), re.IGNORECASE):
+            return None
         relation = self.agent.resolve_relation(match.group(1))
         if relation is None:
             return None
@@ -850,7 +856,12 @@ class Reasoner:
         )
         if not match:
             return None
-        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        if match.group(1) is not None:
+            relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        elif match.group(3) is not None:
+            relation_text, subject_text = match.group(3).strip(), match.group(4).strip()
+        else:
+            relation_text, subject_text = match.group(5).strip(), match.group(6).strip()
         subject = self.agent.resolve_entity(subject_text)
         if subject is None:
             return None
@@ -1317,6 +1328,12 @@ class Reasoner:
         )
 
     _COUNT_Q = re.compile(
+        # "how many planets does the solar system have" / "how many planets are
+        # in the solar system": the relation is a plural noun and the subject
+        # follows it. All three forms put (relation, subject) in groups 1/2,
+        # 3/4 or 5/6 so one body can serve them.
+        r"^how\s+many\s+(\w+)\s+(?:does|do)\s+(?:the\s+)?(.+?)\s+have\s*\??$|"
+        r"^how\s+many\s+(\w+)\s+(?:are|is)\s+(?:there\s+)?(?:in|on)\s+(?:the\s+)?(.+?)\s*\??$|"
         r"^how\s+many\s+(.+?)\s+do\s+you\s+know\s+about\s+(?:the\s+)?(.+?)\s*\??$|"
         r"^how\s+many\s+facts\s+do\s+you\s+know\s*\??$",
         re.IGNORECASE,
@@ -1327,14 +1344,21 @@ class Reasoner:
         match = self._COUNT_Q.match(text.strip())
         if not match:
             return None
-        if match.group(2) is None:
+        # The subject sits in group 2, 4 or 6 depending on which alternation
+        # matched; the bare "how many facts" form has none of them.
+        if all(match.group(i) is None for i in (2, 4, 6)):
             return Answer(
                 f"I have {len(self.agent.kb)} facts written.",
                 kind="count",
                 confidence=1.0,
                 details=["counted len(kb)"],
             )
-        relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        if match.group(1) is not None:
+            relation_text, subject_text = match.group(1).strip(), match.group(2).strip()
+        elif match.group(3) is not None:
+            relation_text, subject_text = match.group(3).strip(), match.group(4).strip()
+        else:
+            relation_text, subject_text = match.group(5).strip(), match.group(6).strip()
         subject = self.agent.resolve_entity(subject_text)
         if subject is None:
             return Answer(
@@ -1344,6 +1368,15 @@ class Reasoner:
         relation = self.agent.resolve_relation(relation_text)
         all_facts = self.agent.kb.facts_about(subject)
         named = [o for r, o, _c in all_facts if relation and r == relation]
+        # A counted relation stores the number as the object ("8"), so answer the
+        # value rather than listing it as though it were a name.
+        if relation and len(named) == 1 and named[0].replace("-", "").isdigit():
+            return Answer(
+                f"{named[0]}.",
+                kind="count",
+                confidence=1.0,
+                details=[f"({subject}, {relation}) -> {named[0]}"],
+            )
         if relation:
             return Answer(
                 f"{len(named)}: " + (", ".join(o.replace("_", " ") for o in named) or "none"),
