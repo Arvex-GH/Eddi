@@ -356,8 +356,14 @@ class Reasoner:
             # catalyst do" must not refuse because it lacks a second term.
             if len(matched) < 2 and not (q_idents and hit.matched_identifiers):
                 # ...unless one of those words is the subject itself, which is
-                # the whole question compressed into a noun.
-                if not (len(q_terms) <= 2 and len(matched) >= 1) and not hit.subject:
+                # the whole question compressed into a noun. With a one-word
+                # question every candidate matches that one word, so score has
+                # to decide: "why do we sleep" matched a sentence about stress
+                # merely because it mentioned sleep in passing, while the
+                # sentence actually about sleep was ranked lower.
+                if not hit.subject:
+                    continue
+                if len(matched) <= 1 and best is not None and hit.score < best_key[1]:
                     continue
             # Rank by coverage, then by score. Coverage alone made an arbitrary
             # choice among chunks with the same coverage -- asked "why does a
@@ -749,6 +755,14 @@ class Reasoner:
                          text, re.IGNORECASE)
         if match:
             phrase = match.group(1)
+            # A multi-word phrase may name one concept whose first word also
+            # names something else. "compound interest" is a financial idea;
+            # "compound" alone is a chemistry one, and resolving only the head
+            # noun answered the finance question with the chemistry definition.
+            # Try the whole thing first, then fall back.
+            whole = self.agent.kb.resolve(phrase)
+            if whole and self.agent.kb.facts_about(whole):
+                return self._about(whole)
             subject = self.agent.resolve_entity(phrase)
             relation = self.agent.resolve_relation(phrase)
             if relation is not None and not self.agent.kb.facts_about(subject or ""):

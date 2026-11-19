@@ -265,6 +265,7 @@ from .curriculum_packs import mathematics as _mathematics
 from .curriculum_packs import computing_deep as _computing_deep
 from .curriculum_packs import history as _history
 from .curriculum_packs import language as _language
+from .curriculum_packs import money as _money
 from .curriculum_packs import science_deep as _science_deep
 
 PACKS: Dict[str, Dict[str, List]] = {
@@ -277,6 +278,7 @@ PACKS: Dict[str, Dict[str, List]] = {
         "prose": _computing_deep.PROSE,
     },
     "language": {"facts": _language.FACTS, "prose": _language.PROSE},
+    "money": {"facts": _money.FACTS, "prose": _money.PROSE},
     "geography_world": {
         "facts": _geography_world.FACTS,
         "prose": _geography_world.PROSE,

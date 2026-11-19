@@ -480,6 +480,10 @@ class ChunkMemory:
                     weighted *= 1.05
                 idf_of[term] = weighted
             total_idf = sum(idf_of.values()) or 1.0
+            chunk_words: Dict[int, List[str]] = {
+                cid: [_stem(w) for w in _WORD_RE.findall(self._by_id[cid].text)]
+                for cid in scores
+            }
             # The heaviest term is the subject of the question: in "why does a
             # catalyst speed up a reaction" that is "catalyst", which names what
             # is being asked about. A chunk that never mentions the subject
@@ -502,6 +506,21 @@ class ChunkMemory:
                 factor = 0.35 + 0.65 * share ** 2
                 if subject and subject not in covered:
                     factor *= 0.3
+                # A sentence *about* a thing names it early; one that mentions it
+                # in passing buries it. "Sleep is when the body repairs tissue"
+                # discusses sleep, while "long term stress ... disturbs sleep"
+                # merely contains the word -- and repetition made the second
+                # win a one-word question. Weight by how early the subject
+                # appears, relative to the length of the chunk.
+                if subject:
+                    words = chunk_words.get(cid)
+                    if words:
+                        position = next(
+                            (i for i, w in enumerate(words) if w == subject), None
+                        )
+                        if position is not None:
+                            earliness = 1.0 - min(position / 12.0, 1.0)
+                            factor *= 0.75 + 0.45 * earliness
                 scores[cid] *= factor
 
         ident_matches: Dict[int, List[str]] = {}
