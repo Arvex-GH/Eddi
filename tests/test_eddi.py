@@ -847,3 +847,83 @@ class TestVectorSymbolicMemory(unittest.TestCase):
             mem = project_repository(Toolbox(tmp))
             self.assertEqual(mem.lookup("convert", "defined_in"), ["pkg/mod.py"])
             self.assertIn("pkg.mod", [t for _, t in mem.relations_of("test_mod")])
+
+
+class TestSuffixSliceStrategy(unittest.TestCase):
+    """A silent stemmer bug: the slice does not match its own example."""
+
+    SOURCE = '''def _stem(word: str) -> str:
+    w = word.lower()
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-2]                            # studies -> study
+    elif w.endswith("es") and len(w) > 4:
+        w = w[:-1]                            # sizes -> size
+    return w
+'''
+
+    def _view(self):
+        from eddi.swe.proposers import view_functions
+
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "words.py"), "w", encoding="utf-8") as handle:
+            handle.write(self.SOURCE)
+        from eddi.swe.tools import Toolbox
+
+        return view_functions(Toolbox(root), "words.py")[0]
+
+    def test_finds_the_inconsistent_slice(self):
+        from eddi.swe.proposers import HeuristicProposer
+
+        proposal = HeuristicProposer()._suffix_slice_mismatch(self._view())
+        self.assertIsNotNone(proposal)
+        self.assertIn("[:-3]", proposal.new)
+        self.assertIn("'y'", proposal.new)
+        self.assertIn("studi", proposal.reason)
+
+    def test_the_rule_then_satisfies_its_own_example(self):
+        from eddi.swe.proposers import HeuristicProposer
+
+        proposal = HeuristicProposer()._suffix_slice_mismatch(self._view())
+        # Apply the proposal the way the loop does: replace the target line in
+        # the original source, then run the whole repaired function.
+        repaired = self.SOURCE.replace(proposal.old, proposal.new)
+        self.assertNotEqual(repaired, self.SOURCE)
+        namespace = {}
+        exec(compile(repaired, "<repaired>", "exec"), namespace)
+        self.assertEqual(namespace["_stem"]("studies"), "study")
+        self.assertEqual(namespace["_stem"]("sizes"), "size")
+
+
+class TestStemmerBenchmark(unittest.TestCase):
+    """The seventh benchmark task is solvable and is really broken."""
+
+    def test_task_is_registered(self):
+        from eddi.swe.bench import TASKS
+
+        names = [task.name for task in TASKS]
+        self.assertIn("stemmer-slice", names)
+        self.assertEqual(len(TASKS), 7)
+
+    def test_hidden_test_rejects_the_broken_fixture(self):
+        import subprocess
+        import tempfile
+
+        from eddi.swe.bench import TASKS
+
+        task = [t for t in TASKS if t.name == "stemmer-slice"][0]
+        root = tempfile.mkdtemp()
+        for relative, body in task.files.items():
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+        with open(os.path.join(root, "hidden_test.py"), "w", encoding="utf-8") as handle:
+            handle.write(task.hidden_test)
+        outcome = subprocess.run(
+            ["python3", "-m", "unittest", "hidden_test", "-q"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(outcome.returncode, 0)
+        self.assertIn("study", outcome.stderr)

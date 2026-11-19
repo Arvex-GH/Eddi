@@ -554,7 +554,87 @@ if __name__ == "__main__":
 ''',
         tags=("control-flow", "off-by-one"),
     ),
+    BenchTask(
+        name="stemmer-slice",
+        goal=(
+            "Searching for 'studies' no longer finds sentences "
+            "containing 'study'. Singular and plural nouns ending in "
+            "-y stop sharing a stem, so retrieval misses them. The "
+            "plural rule in `_stem` strips one character too few."
+        ),
+        files={
+            "pack/words.py": '''"""Reduce a word to the root shared by its inflections."""
+
+
+def _stem(word):
+    """Strip a plural suffix, keeping the root the singular also has."""
+    w = word.lower()
+    if len(w) <= 3:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-2]                            # studies -> study
+    elif w.endswith("es") and len(w) > 4:
+        w = w[:-1]                            # sizes -> size
+    elif w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]                            # catalysts -> catalyst
+    return w
+
+
+def same_root(a, b):
+    """True when two surface forms share a stem."""
+    return _stem(a) == _stem(b)
+''',
+            "test_words.py": '''import unittest
+
+from pack.words import _stem, same_root
+
+
+class TestWords(unittest.TestCase):
+    def test_plural_matches_singular(self):
+        self.assertTrue(same_root("catalyst", "catalysts"))
+
+    def test_word_is_not_mangled(self):
+        self.assertEqual(_stem("speed"), "speed")
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+        },
+        probe="python3 -m unittest test_words -q",
+        hidden_test='''import unittest
+
+from pack.words import _stem, same_root
+
+
+class TestWordsHidden(unittest.TestCase):
+    def test_y_plurals_share_a_root(self):
+        for singular, plural in (
+            ("study", "studies"),
+            ("theory", "theories"),
+            ("penny", "pennies"),
+        ):
+            self.assertTrue(same_root(singular, plural), singular)
+
+    def test_no_dangling_vowel_from_a_suffix(self):
+        # "studies" once stemmed to "studi": the -ies suffix was stripped but
+        # the y it stands for was never restored, so the root kept a vowel that
+        # only exists in the plural.
+        for plural in ("studies", "theories", "pennies"):
+            self.assertFalse(_stem(plural).endswith("i"), plural)
+
+    def test_other_plurals_still_work(self):
+        self.assertTrue(same_root("size", "sizes"))
+        self.assertTrue(same_root("catalyst", "catalysts"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+''',
+        tags=("silent", "slice", "retrieval"),
+    ),
 ]
+
 
 
 # ---------------------------------------------------------------------------

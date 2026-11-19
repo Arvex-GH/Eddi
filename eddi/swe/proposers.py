@@ -164,6 +164,7 @@ class HeuristicProposer:
         self.strategies = (
             self._trailing_drop,
             self._shared_mutable,
+            self._suffix_slice_mismatch,
             self._inverted_guard,
             self._search_boundary,
             self._swallowed_error,
@@ -270,6 +271,77 @@ class HeuristicProposer:
                 f"        {arg.arg} = {literal}\n"
             )
             return Proposal.with_body_guard(view, old_sig, new_sig, arg.arg, literal, guard)
+        return None
+
+    def _suffix_slice_mismatch(self, view: FunctionView) -> Optional[Proposal]:
+        """A suffix rule whose slice cannot produce its own stated example.
+
+        Inflection handling is written "if the word ends with S, strip len(S)
+        and maybe append a letter". The classic defect is a slice that does not
+        match the suffix it tested:
+
+            if w.endswith("ies"):
+                w = w[:-2]          # studies -> study
+
+        `w[:-2]` leaves "studi", which is neither the word nor a prefix of it,
+        and nothing raises -- so no traceback ever points here. Singular and
+        plural simply stop matching, and retrieval loses half the vocabulary.
+
+        The example in the trailing comment is the author's own statement of
+        intent, which makes it the cheapest possible oracle: apply the rule's
+        slice to the example's input and see whether the output is reproduced.
+        """
+        rows = view.source.splitlines()
+        for node in view.tree.body if view.tree else []:
+            if not isinstance(node, ast.If):
+                continue
+            tested = _endswith_argument(node.test)
+            if not tested:
+                continue
+            example = _comment_example(rows, node, view.start)
+            if example is None:
+                continue
+            before, after = example
+            if not before.endswith(tested):
+                continue
+            for statement in node.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                if not statement.targets or not isinstance(statement.targets[0], ast.Name):
+                    continue
+                var = statement.targets[0].id
+                slice_len, appended = _slice_shape(statement.value)
+                if slice_len is None:
+                    continue
+                produced = before[: len(before) - slice_len] + appended
+                if produced == after:
+                    continue  # the rule does what its example says
+                # Find the slice that *would* produce the example.
+                correct = _minimal_slice(before, after, tested)
+                if correct is None:
+                    continue
+                slice_len, appended = correct
+                for row in rows:
+                    code = row.split("#", 1)[0]
+                    if not code.strip().startswith(f"{var} ="):
+                        continue
+                    if f"[:-{slice_len}]" in code:
+                        continue  # already correct
+                    updated_code = re.sub(
+                        r"\[:-\d+\](\s*\+\s*['\"][^'\"]*['\"])?",
+                        f"[:-{slice_len}]" + (f" + {appended!r}" if appended else ""),
+                        code,
+                        count=1,
+                    )
+                    if updated_code == code:
+                        continue
+                    return Proposal(
+                        view.path,
+                        row,
+                        updated_code + row[len(code):],
+                        f"{tested!r} rule produces {produced!r} but the "
+                        f"example says {after!r}",
+                    )
         return None
 
     def _inverted_guard(self, view: FunctionView) -> Optional[Proposal]:
@@ -463,3 +535,93 @@ class Proposal:
             "\n".join(rows) + "\n",
             "mutable default argument shared across calls",
         )
+
+
+def _endswith_argument(test: ast.AST) -> Optional[str]:
+    """The literal a guard tests with `.endswith(...)`, if it is one."""
+    for node in ast.walk(test):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "endswith"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            return node.args[0].value
+    return None
+
+
+def _comment_target(view: FunctionView, node: ast.AST) -> Optional[str]:
+    """Read the "before -> after" example in the comment on a guard's line.
+
+    The comment is not decoration here: it is the author's own statement of
+    what the rule should do, which makes it the cheapest possible oracle.
+    """
+    line_no = getattr(node, "lineno", None)
+    if line_no is None:
+        return None
+    rows = view.source.splitlines()
+    for offset in (0, 1, -1):
+        index = line_no - view.start + offset
+        if 0 <= index < len(rows) and "#" in rows[index]:
+            comment = rows[index].split("#", 1)[1]
+            if "->" in comment:
+                return comment.split("->", 1)[1].strip()
+    return None
+
+
+def _comment_example(rows: List[str], node: ast.AST, offset: int):
+    """The (before, after) pair in the comment next to a guard, if present."""
+    body_line = node.body[0].lineno if node.body else None
+    if body_line is None:
+        return None
+    index = body_line - offset
+    if not (0 <= index < len(rows)):
+        return None
+    row = rows[index]
+    if "#" not in row or "->" not in row:
+        return None
+    comment = row.split("#", 1)[1]
+    before, _, after = comment.partition("->")
+    before, after = before.strip(), after.strip()
+    if not before or not after:
+        return None
+    return before, after
+
+
+def _slice_shape(value: ast.AST):
+    """(characters stripped, appended text) for `w[:-k] + "x"` or `w[:-k]`."""
+    appended = ""
+    node = value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        right = node.right
+        if not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
+            return (None, "")
+        appended = right.value
+        node = node.left
+    if not isinstance(node, ast.Subscript):
+        return (None, "")
+    sl = node.slice
+    if not isinstance(sl, ast.Slice) or sl.lower is not None or sl.step is not None:
+        return (None, "")
+    upper = sl.upper
+    if not (isinstance(upper, ast.UnaryOp) and isinstance(upper.op, ast.USub)
+            and isinstance(upper.operand, ast.Constant)):
+        return (None, "")
+    return (upper.operand.value, appended)
+
+
+def _minimal_slice(before: str, after: str, tested: str):
+    """The (strip, append) that turns ``before`` into ``after``.
+
+    Preferred form is the natural one for an inflection rule: strip the whole
+    tested suffix, then append whatever relates the root to the result.
+    """
+    if not before.endswith(tested):
+        return None
+    root = before[: len(before) - len(tested)]
+    if after.startswith(root):
+        return (len(tested), after[len(root):])
+    return None
+
