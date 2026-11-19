@@ -579,3 +579,65 @@ class TestBrainCarriesCorpus(unittest.TestCase):
                 )
             finally:
                 loaded.close(save=False)
+
+class TestStemming(unittest.TestCase):
+    """Stems must join inflections without inventing shorter non-words."""
+
+    def test_inflections_share_a_stem(self):
+        from eddi.memory import _stem
+        pairs = [
+            ("catalyst", "catalysts"), ("reaction", "reactions"),
+            ("freeze", "freezes"), ("string", "strings"), ("seed", "seeds"),
+            ("stop", "stopped"), ("plan", "planned"), ("process", "processes"),
+            ("study", "studies"), ("carry", "carried"), ("run", "running"),
+            ("size", "sizes"), ("hundred", "hundreds"), ("need", "needs"),
+            ("use", "used"), ("theory", "theories"), ("proton", "protons"),
+        ]
+        for singular, plural in pairs:
+            self.assertEqual(
+                _stem(singular), _stem(plural),
+                f"{singular}/{plural} should share a stem",
+            )
+
+    def test_short_words_are_not_mangled(self):
+        from eddi.memory import _stem
+        # "speed" once stemmed to "spe", which matched nothing while displacing
+        # real matches: a question about catalysts lost to one about light.
+        for word in ("speed", "seed", "need", "bed", "red", "string", "hundred"):
+            self.assertGreaterEqual(len(_stem(word)), len(word) - 1, word)
+        self.assertEqual(_stem("speed"), "speed")
+        self.assertNotEqual(_stem("speed"), _stem("spe"))
+
+class TestRetrievalPrefersTheQuestion(unittest.TestCase):
+    """The answer should be the chunk that addresses what was asked."""
+
+    def _agent(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        agent = EddiAgent(lm_order=3, persist_context=False,
+                          memory_path=os.path.join(tmp, "m.jsonl"))
+        for s in (
+            "Photosynthesis turns light, water and carbon dioxide into glucose and oxygen.",
+            "Taking a logarithm answers the question of which exponent produces a given number.",
+            "A catalyst lowers activation energy and is not consumed by the reaction.",
+            "Enzymes are proteins that speed up reactions without being consumed.",
+        ):
+            agent.train_corpus([s])
+        return agent
+
+    def test_rare_subject_beats_common_verb(self):
+        agent = self._agent()
+        try:
+            reply = agent.answer("what does photosynthesis take in")
+            self.assertIn("Photosynthesis", reply.text)
+        finally:
+            agent.close(save=False)
+
+    def test_the_specific_chunk_wins(self):
+        agent = self._agent()
+        try:
+            reply = agent.answer("why does a catalyst speed up a reaction")
+            self.assertIn("catalyst", reply.text.lower())
+            self.assertNotIn("logarithm", reply.text)
+        finally:
+            agent.close(save=False)

@@ -272,6 +272,8 @@ FACTS: List[Fact] = [
 
 PROSE: List[str] = [
     "Physics studies matter, energy, motion and the forces between them.",
+    "Water has the chemical formula H2O, two hydrogen atoms bonded to one oxygen atom.",
+    "The chemical formula of a compound says which atoms it contains and in what ratio.",
     "Newton's second law says force equals mass times acceleration, so a heavier object needs more force to accelerate equally.",
     "Newton's third law says every action has an equal and opposite reaction, which is why a rocket pushes gas down to move up.",
     "Kinetic energy depends on the square of velocity, so doubling speed quadruples the energy of a moving object.",

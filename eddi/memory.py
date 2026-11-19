@@ -67,18 +67,87 @@ STOPWORDS: Set[str] = set(
 )
 
 
+#: Words that end in a suffix but are not inflections of anything. Stripping
+#: blindly is what turned "speed" into the nonsense stem "spe", which matched
+#: nothing yet displaced real matches -- a question about catalysts lost to a
+#: sentence about the speed of light because the two shared a broken stem.
+_NOT_INFLECTIONS = frozenset(
+    """speed seed feed need weed deed creed breed steed reed tweed bleed heed
+    bend spend trend blend mend send lend rend tend wend
+    hundred sacred hatred kindred naked wicked rugged jagged ragged
+    bed red shed sled shred bedstead""".split()
+)
+
+
 def _stem(word: str) -> str:
-    """Conservative English suffix stripping, enough to match inflections."""
+    """Reduce a word to a root shared by its inflections, without inventing one.
+
+    A stemmer exists so that "reaction" and "reactions" match, and so that
+    "compute" and "computed" do. It must never *invent* a root that is shorter
+    than a word: that produces a token which matches nothing yet competes with
+    everything. Every rule here therefore keeps the result at least as long as
+    a plausible English root, and a short list of words that merely look
+    inflected is left alone.
+    """
     w = word.lower()
+    if len(w) <= 3:
+        return w
+    if w in _NOT_INFLECTIONS:
+        return w
     for suffix in ("ational", "ization", "iveness", "fulness", "ousness"):
         if w.endswith(suffix) and len(w) - len(suffix) >= 3:
             return w[: -len(suffix)]
-    for suffix in ("ingly", "edly", "ation", "ition", "ment", "ness", "ing", "ed", "es", "ly", "s"):
-        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
-            w = w[: -len(suffix)]
-            break
-    if len(w) > 4 and w.endswith("e"):
-        w = w[:-1]
+
+    def plausible(root: str) -> bool:
+        return len(root) >= 3 and any(c in "aeiouy" for c in root)
+
+    def undouble(root: str) -> str:
+        # "stopped" -> "stopp" -> "stop"; "planned" -> "plan".
+        if len(root) > 3 and root[-1] == root[-2] and root[-1] not in "aeiou":
+            return root[:-1]
+        return root
+
+    # --- plural and third person singular -----------------------------------
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-3] + "y"                      # studies -> study
+    elif w.endswith("sses"):
+        w = w[:-2]                            # processes -> process
+    elif w.endswith("es") and len(w) > 4:
+        root = w[:-2]
+        if root.endswith(("s", "x", "z", "ch", "sh")):
+            w = root                          # boxes -> box, processes -> process
+        else:
+            w = w[:-1]                        # sizes -> size
+    elif w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        singular = w[:-1]                     # catalysts -> catalyst
+        w = singular
+
+    # --- past tense and progressive -----------------------------------------
+    if w in _NOT_INFLECTIONS:
+        return w
+    if w.endswith("ed") and not w.endswith("eed"):
+        # "used" is the past of "use", not a stem of "us"; "carried" keeps its
+        # y so it meets "carry".
+        if w.endswith("ied") and len(w) > 4:
+            w = w[:-3] + "y"
+        else:
+            root = undouble(w[:-2])
+            if plausible(root):
+                w = root
+            elif w not in _NOT_INFLECTIONS:
+                w = w[:-1]                    # used -> use
+    elif w.endswith("ing"):
+        root = undouble(w[:-3])
+        if plausible(root):
+            w = root
+
+    # --- silent final "e", so "freeze" and "freezes" meet -------------------
+    if w in _NOT_INFLECTIONS:
+        return w
+    if len(w) >= 4 and w.endswith("e") and not w.endswith("ee"):
+        root = w[:-1]
+        if plausible(root):
+            w = root
     return w
 
 
@@ -161,6 +230,10 @@ class Hit:
     score: float
     matched_terms: List[str] = field(default_factory=list)
     matched_identifiers: List[str] = field(default_factory=list)
+    #: The heaviest query term, when this hit contains it. It names what the
+    #: question is *about*, and a hit that lacks it cannot be the answer.
+    subject: str = ""
+    missing_subject: bool = False
 
     @property
     def text(self) -> str:
@@ -328,6 +401,7 @@ class ChunkMemory:
         k: int = 5,
         identifier_boost: float = 6.0,
         phrase_boost: float = 3.0,
+        exclude_sources: Optional[Sequence[str]] = None,
     ) -> List[Hit]:
         """Rank chunks for a query with BM25 plus identifier and phrase boosts.
 
@@ -362,6 +436,74 @@ class ChunkMemory:
                 scores[chunk_id] = scores.get(chunk_id, 0.0) + idf * (tf * (k1 + 1)) / denom
                 matched.setdefault(chunk_id, []).append(term)
 
+        # Coverage: how much of the query a chunk actually contains. BM25 sums
+        # evidence per term, so a chunk that repeats one common word can outrank
+        # the single chunk that answers everything asked. Asked "why does a
+        # catalyst speed up a reaction", a sentence about enzymes (which says
+        # "speed" and "reactions" but never mentions a catalyst) beat both
+        # catalyst sentences. A chunk matching every query term is worth far
+        # more than one matching half of them, so the score is scaled by
+        # coverage with a floor that keeps partial matches usable.
+        subject = ""
+        if q_terms:
+            # Weight each query term by how rare it is. Covering "photosynthesis"
+            # says far more than covering "take", and an unweighted ratio let a
+            # sentence about logarithms win a question about photosynthesis
+            # because both happened to contain one of the two words.
+            # Terms that the query capitalises, which usually name an entity.
+            capitalised = {
+                _stem(w) for w in _WORD_RE.findall(query) if w[:1].isupper()
+            }
+            doc_freq: Dict[str, int] = {
+                t: len(self._postings.get(t, ())) for t in q_terms
+            }
+            idf_of: Dict[str, float] = {}
+            for term in q_terms:
+                df = len(self._postings.get(term, ()))
+                idf = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+                # Rarity alone is not enough on a small store: "take" is as rare
+                # here as "photosynthesis" simply because the corpus is young.
+                # A longer word also names a narrower idea -- photosynthesis is
+                # a whole subject, take is a verb that fits anywhere -- so the
+                # two signals are multiplied.
+                # Capitalisation in the original query is a strong signal that a
+                # word names an entity ("the Moon", "Switzerland") rather than a
+                # category ("planet", "chemical"). Categories are common nouns
+                # that the store has in abundance; entities it has once. This
+                # was chosen after "which planet does the Moon orbit" picked
+                # "planet" as its subject and answered with the largest planet
+                # rather than with the Moon's orbit.
+                weighted = idf * len(term)
+                if term in capitalised:
+                    weighted *= 1.8
+                if term in doc_freq and doc_freq[term] <= 1:
+                    weighted *= 1.05
+                idf_of[term] = weighted
+            total_idf = sum(idf_of.values()) or 1.0
+            # The heaviest term is the subject of the question: in "why does a
+            # catalyst speed up a reaction" that is "catalyst", which names what
+            # is being asked about. A chunk that never mentions the subject
+            # cannot be the answer, however many supporting words it shares --
+            # which is exactly how a sentence about enzymes displaced both
+            # catalyst sentences, matching "speed" and "reaction" while
+            # containing no catalysts at all.
+            # Break ties by position: English puts the topic early, so in
+            # "why does a catalyst speed up a reaction" the subject is
+            # "catalyst", not the equally weighted "reaction" that follows it.
+            order = {term: i for i, term in enumerate(q_terms)}
+            subject = (
+                max(idf_of, key=lambda t: (idf_of[t], -order.get(t, 0)))
+                if idf_of
+                else ""
+            )
+            for cid in scores:
+                covered = set(matched.get(cid, []))
+                share = sum(idf_of.get(t, 0.0) for t in covered) / total_idf
+                factor = 0.35 + 0.65 * share ** 2
+                if subject and subject not in covered:
+                    factor *= 0.3
+                scores[cid] *= factor
+
         ident_matches: Dict[int, List[str]] = {}
         for ident in q_idents:
             for chunk_id in self._ident.get(ident, []):
@@ -374,6 +516,19 @@ class ChunkMemory:
             if q_lower and len(q_lower) > 8 and q_lower in self._by_id[chunk_id].text.lower():
                 scores[chunk_id] += phrase_boost
 
+        if exclude_sources:
+            # A stored *question* matches the next question on every word and
+            # answers none of them: asked "why does a catalyst speed up a
+            # reaction", the agent retrieved its own earlier phrasing of that
+            # question and replied with it. Questions stay in the store (they
+            # carry context) but retrieval can leave them out.
+            skip = set(exclude_sources)
+            scores = {
+                cid: score
+                for cid, score in scores.items()
+                if self._by_id[cid].source not in skip
+            }
+
         ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
         return [
             Hit(
@@ -381,6 +536,8 @@ class ChunkMemory:
                 score=score,
                 matched_terms=matched.get(cid, []),
                 matched_identifiers=ident_matches.get(cid, []),
+                subject=subject if subject in set(matched.get(cid, [])) else "",
+                missing_subject=bool(subject) and subject not in set(matched.get(cid, [])),
             )
             for cid, score in ranked
         ]

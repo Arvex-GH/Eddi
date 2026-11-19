@@ -294,7 +294,13 @@ class Reasoner:
         # A stored question is weak evidence: a previously asked question
         # resembles the current one closely without containing any answer.
         def _is_question(chunk) -> bool:
-            return chunk.source in ("question", "reply-question") or chunk.text.strip().endswith("?")
+            # A question can end in "???" or in no mark at all, so the stored
+            # source is the reliable signal: an earlier question resembles the
+            # current one word for word and answers nothing.
+            return (
+                chunk.source in ("question", "reply-question")
+                or chunk.text.strip().endswith("?")
+            )
 
         # Never fall back to question chunks: if the only things that resemble
         # the query are earlier questions, memory has nothing to say and the
@@ -312,22 +318,53 @@ class Reasoner:
         q_idents = set(identifiers_of(text))
         wanted = max(1, len(q_terms))
         best = None
+        best_key = (0.0, 0.0)
         best_cover = 0.0
+        fallback = None
+        fallback_cover = 0.0
         for hit in pool:
             matched = set(hit.matched_terms) & q_terms
             coverage = len(matched) / wanted
             if q_idents and hit.matched_identifiers:
                 coverage = 1.0  # an exact identifier is decisive on its own
+            # Containing the subject of the question is worth more than the
+            # arithmetic suggests: "catalyst" is a third of the words but all of
+            # the topic. Half credit clears the acceptance floor while still
+            # ranking below a chunk that covers subject and support together.
+            if hit.subject:
+                coverage = max(coverage, 0.5)
+            # A chunk that never mentions the subject of the question is a poor
+            # answer: support words ("speed", "reaction") are shared by
+            # sentences about entirely different things, while the subject is
+            # not. Such a chunk is only used if nothing better exists, so track
+            # it separately rather than discarding it outright. This test comes
+            # before the coverage test: the *right* answer here matches only the
+            # subject, and a rule that demands two terms would have thrown it
+            # away while keeping the sentence that merely shares scaffolding.
+            if hit.missing_subject:
+                if fallback is None:
+                    fallback, fallback_cover = hit, coverage
+                continue
             # A single shared word is normally too little to answer with: "hi"
             # shares "hi" with "hi, what is python" and would reply with a
             # greeting. But when the question has only one content word and the
             # hit contains it, that word *is* the question -- "what does a
             # catalyst do" must not refuse because it lacks a second term.
             if len(matched) < 2 and not (q_idents and hit.matched_identifiers):
-                if not (len(q_terms) <= 2 and len(matched) >= 1):
+                # ...unless one of those words is the subject itself, which is
+                # the whole question compressed into a noun.
+                if not (len(q_terms) <= 2 and len(matched) >= 1) and not hit.subject:
                     continue
-            if coverage > best_cover:
-                best, best_cover = hit, coverage
+            # Rank by coverage, then by score. Coverage alone made an arbitrary
+            # choice among chunks with the same coverage -- asked "why does a
+            # catalyst speed up a reaction", the enzyme sentence and the
+            # catalyst sentence both cover two terms, and the first one seen
+            # won regardless of which better answered the question.
+            key = (round(coverage, 3), hit.score)
+            if best is None or key > best_key:
+                best, best_key, best_cover = hit, key, coverage
+        if best is None:
+            best, best_cover = fallback, fallback_cover
         if best is None or best_cover < 0.34:
             return None
         # A question that the fact base could answer is handled earlier; by the

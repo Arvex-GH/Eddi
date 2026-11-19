@@ -175,8 +175,12 @@ class EddiAgent:
         return len(self.memory.add(text, source=source))
 
     def recall(self, query: str, k: int = 4) -> List:
-        """Retrieve the best-matching stored spans for ``query``."""
-        return self.memory.search(query, k=k)
+        """Retrieve the best-matching stored spans for ``query``.
+
+        Previously asked questions are skipped: they match a new question on
+        every word and answer none of them.
+        """
+        return self.memory.search(query, k=k, exclude_sources=("question",))
 
     def answer(self, text: str):
         """Route a message through the reasoning layer and return an ``Answer``.

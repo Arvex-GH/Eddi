@@ -124,6 +124,8 @@ SENTENCES: List[str] = [
     "Atoms bond to fill their outer electron shell.",
     "A covalent bond shares electrons, and an ionic bond transfers them.",
     "A molecule is a group of atoms held together by covalent bonds.",
+    "Water has the chemical formula H2O, two hydrogen atoms bonded to one oxygen atom.",
+    "The formula of a compound says which atoms it contains and in what ratio.",
     "A chemical reaction rearranges atoms without creating or destroying them.",
     "A reaction is balanced when the same number of each atom appears on both sides.",
     "Activation energy is the barrier a reaction must climb to proceed.",
