@@ -2,16 +2,22 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <unordered_map>
-#include <vector>
+#endif
 
 // Eddi Core: Hyperdimensional Writable Knowledge + 1M-Token Disk-Backed Context Engine
 // Zero external dependencies. Compiles to a native binary.
@@ -51,7 +57,12 @@ struct HyperVector {
     double similarity(const HyperVector& other) const {
         uint32_t diff = 0;
         for (size_t i = 0; i < HV_WORDS; ++i) {
-            diff += __builtin_popcountll(words[i] ^ other.words[i]);
+            uint64_t x = words[i] ^ other.words[i];
+#ifdef _MSC_VER
+            diff += static_cast<uint32_t>(__popcnt64(x));
+#else
+            diff += __builtin_popcountll(x);
+#endif
         }
         return 1.0 - (static_cast<double>(diff) / (HV_WORDS * 64.0));
     }
@@ -76,6 +87,17 @@ public:
     MMapContextStore(const std::string& path, size_t max_tokens = 1200000)
         : path_(path), max_tokens_(max_tokens) {
         size_t bytes = max_tokens_ * sizeof(DiskTokenRecord);
+#ifdef _WIN32
+        hFile_ = CreateFileA(path_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile_ != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER li;
+            li.QuadPart = static_cast<LONGLONG>(bytes);
+            hMap_ = CreateFileMappingA(hFile_, nullptr, PAGE_READWRITE, li.HighPart, li.LowPart, nullptr);
+            if (hMap_) {
+                data_ = static_cast<DiskTokenRecord*>(MapViewOfFile(hMap_, FILE_MAP_ALL_ACCESS, 0, 0, bytes));
+            }
+        }
+#else
         fd_ = open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (fd_ >= 0) {
             if (ftruncate(fd_, bytes) == 0) {
@@ -86,15 +108,22 @@ public:
                 }
             }
         }
+#endif
     }
 
     ~MMapContextStore() {
+#ifdef _WIN32
+        if (data_) UnmapViewOfFile(data_);
+        if (hMap_) CloseHandle(hMap_);
+        if (hFile_ != INVALID_HANDLE_VALUE) CloseHandle(hFile_);
+#else
         if (data_) {
             munmap(data_, max_tokens_ * sizeof(DiskTokenRecord));
         }
         if (fd_ >= 0) {
             close(fd_);
         }
+#endif
     }
 
     void append(uint64_t token_hash, uint64_t sig) {
@@ -128,7 +157,12 @@ public:
 private:
     std::string path_;
     size_t max_tokens_;
+#ifdef _WIN32
+    HANDLE hFile_ = INVALID_HANDLE_VALUE;
+    HANDLE hMap_ = nullptr;
+#else
     int fd_ = -1;
+#endif
     DiskTokenRecord* data_ = nullptr;
     size_t count_ = 0;
     std::vector<uint64_t> l1_window_;
